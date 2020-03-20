@@ -268,7 +268,7 @@
   - 최댓값, 최소값, 범위(min ~ max)를 구하기
   - 범위를 기반으로 **몇개의 계급**으로 나눌지 결정
     - 각 계급의 **하한**과 **상한**을 구함
-  - 각 계급에 들어가는 **데이터 개수(도수)**를 구하고, 표로 정리
+  - 각 계급에 들어가는 **데이터 개수**(도수)를 구하고, 표로 정리
 - 이를 그래프로 그리면, 히스토그램이 된다.
 
 #### 임의의 계층 수로 히스토그램 만들기
@@ -299,7 +299,7 @@
   ```
 - 최소 금액에서 최대 금액의 범위를 계층으로 분할하라면
   - `매출금액 - 최소금액`
-  - 이후 계층을 판별하기 위한 **정규화 금액(diff)**를 계산
+  - 이후 계층을 판별하기 위한 **정규화 금액**(`diff`)를 계산
 - 이후 첫 계층의 범위(`bucket_range`)는
   - `range_price`를 계급 수(`bucket_num`)으로 나누어 구할 수 있음
 - 정규화 금액을 **계급 범위**로 나눈 후
@@ -340,3 +340,130 @@
   ORDER BY amount
   ;
   ```
+- 계급 범위를 10으로 지정했기 때문에,
+  - 최대값인 35000 자체는 11로 지정됨
+- 35000 미만의 값이기 때문에, 35000 자체는 11 계급이기 때문
+- 계급 상한 값을 지정하여 모든 값을 포함하도록 변경
+  - stats 테이블의 정의에서,
+  - 계급 상한을 `금액의 최대값 + 1`을 하여,
+  - 모든 레코드가 계급 상한 미만의 값으로 조정
+- 계급 상한 값을 조정한 쿼리
+  - `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  stats AS (
+    SELECT
+      -- 금액의 최댓값 + 1
+      MAX(price) + 1 AS max_price
+      -- 금액의 최솟값
+      , MIN(price) AS min_price
+      -- 금액의 범위 + 1(실수)
+      , MAX(price) + 1 - MIN(price) AS range_price
+      -- 계층 수
+      , 10 AS bucket_num
+    FROM
+      purchase_detail_log
+  )
+  purchase_log_with_bucket AS (
+    -- 이전과 동일 
+    ...
+  )
+  SELECT *
+  FROM purchase_log_with_bucket
+  ORDER BY price
+  ;
+  ```
+- `bucket_range`에 소수점이 들어가지만,
+  - 최대값 레코드를 포함하여 `1~10`단계로 명확히 구분 됨
+- 마지막 과정으로, **구한 계층**을 사용하여 **도수**를 계싼
+  - 각 계층의 **하한**과 **상한**을 출력해야 함
+  - `lower_limit`와 `upper_limit`을 구하여, **하한**, **상한**을 계산
+- 히스토그램을 구하는 쿼리
+  - `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  stats AS (
+    ...
+  )
+  , purchase_log_with_bucket AS (
+    ...
+  )
+  SELECT
+    bucket
+    -- 계층의 하한과 상한 계산
+    , min_price + bucket_range * (bucket - 1) AS lower_limit
+    , min_price + bucket_range * bucket AS upper_limit
+    -- 도수 세기
+    , COUNT(price) AS num_purchase
+    -- 합계 금액 계산
+    , SUM(price) AS total_amount
+  FROM
+    purchase_log_with_bucket
+  GROUP BY
+    bucket, min_price, bucket_range
+  ORDER BY bucket
+  ;
+  ```
+
+### 임의의 계층 너비로 히스토그램 작성
+- 가격의 **상한**과 **하한**을 기준으로 **최적의 범위**를 구할 수 있지만
+  - **소수점**으로 계층을 구분했으므로, 리포트가 직감적이지 않음
+- 리포트를 받아보는 쪽에서도 쉽게 **이해**할 수 있도록 작성해야 함
+- 개선책
+  - 금액의 `min`, `max`와 `range`를 **고정값** 기반으로
+  - 임의의 계층 너비로 변경할 수 있는 기능 추가
+- 예시
+  - `0 ~ 50,000` 범위를 `10`개의 계층으로 구분하는 쿼리
+  - 출력 결과로 `5,000`단위로 구분된 계층 히스토그램 데이터 출력
+- 히스토그램의 상한과 하한을 수동으로 조정한 쿼리
+  - `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  stats AS (
+    SELECT
+    -- max, min, range, range_count
+    50000 AS max_price
+    , 0 AS min_price
+    , 5000 AS range_price
+    , 10 AS bucket_num
+    FROM
+      purchase_detail_log
+  )
+  , purchase_log_with_bucket AS (
+    ...
+  )
+  SELECT
+    bucket
+    -- 계층의 상한, 하한 계산
+    , min_price + bucket_range * (bucket -1) AS lower_limit
+    , min_price + bucket_range * bucket AS upper_limit
+    -- 도수 세기
+    , COUNT(price) AS num_purchase
+    -- 합계 금액 계산
+    , SUM(price) AS total_amount
+  FROM
+    purchase_log_with_bucket
+  GROUP BY
+    bucket, min_price, bucket_range
+  ORDER BY
+    bucket
+  ;
+  ```
+
+### 히스토그램이 나누어진 경우
+- 히스토그램 산이 `2개`로 나누어진 경우 존재하는 경우
+  - 서로 다른 **모집단**을 기반으로, 하나의 데이터를 도출한 경우
+- 이럴 때는
+  - 데이터에 **여러 조건**을 걸어, **필터링** 하여 확인할 것
+
+#### 정리
+- 매출의 **상승**, **하락**을 조사할 때
+  - **최근 매출**과 **과거 매출**을 기반으로
+  - 두개의 **히스토그램**을 작성
+  - 두 기간 사이의 어떤 부분에 차이가 있는지 확인
+- 예시로
+  - 히스토그램이 전체적으로 하락하는지
+  - 특정 범위만 하락하는지를 확인하면
+    - 어디에 문제가 있는지 파악 가능
+- 히스토그램은
+  - **데이터 분포**를 확인할 때 유용함
