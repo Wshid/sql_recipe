@@ -191,3 +191,125 @@
 - 비어있는 값을 `NULL`로 할지 `EMPTY_STRING`과 같은 특수값으로 처리할지에 따라  
   - 쿼리의 최적화 방법이 달라질 수 있음
 - 따라서 `COALESCE` 함수 또는 `NULLIF` 함수를 사용하여, 변환하는 방법을 기억할 것
+
+### 연령별 구분 집계하기
+- 회원 정보를 저장하는 서비스는
+  - 해당 서비스의 사용자를 파악하고
+  - 의도한대로 서비스가 사용되는지 파악해야 함
+- 또한 광고 디자인과, 다양한 캐치 프레이즈를 검토하려면
+  - **사용자 속성 집계**
+- 사용자의 속성을 정의하고 집계하면, 다양한 리포트 제작이 가능
+- 예시 : 연령별 구분 목록
+  - C : Child, 4~12y, w/m
+  - T : Teenager, 13~19y, w/m
+  - M1 : Male, 20~34y, m
+  - M2 : Male, 35~49, m
+  - F3 : Female, 50~, f
+- 연령별 구분하여 집계
+  - 처음 가입시의 나이를 기반으로 db에 저장할 경우, 변동 우려
+  - 일반적으로 **나이**를 저장하지 않고, 생일을 기반으로 리포트 만드는 시점 집계
+- 사용자의 생일을 계산하는 쿼리
+  - `PostgreSQL`, `Hive`, `RedShift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  -- 생일과 특정 날짜를 정수로 표현한 결과
+  mst_users_with_int_birth_date AS (
+    SELECT
+      * 
+      -- 특정 날짜의 정수 표현(2017.01.01)
+      , 20170101 AS int_specific_date
+      
+      -- 문자열로 구성된 생년월일 -> 정수 표현 변환
+      -- PostgreSQL, Redshift
+      , CAST(replace(substring(birth_date, 1, 10), '-', '') AS integer) AS int_birth_date
+      -- BigQuery
+      , CAST(replace(substr(birth_date, 1, 10), '-', '') AS int64) AS int_birth_date
+      -- Hive, SparkSQL
+      , CAST(regexp_replace(substring(birth_date, 1, 10), '-', '') AS int) AS int_birth_date
+    FROM
+      mnt_users
+  )
+  -- 생일 정보를 부여한 사용자 마스터
+  , mst_users_with_age AS (
+    SELECT
+      *
+      -- 2017.01.01의 나이
+      , floor((int_specific_date - int_birth_date) / 10000) AS age
+    FROM mst_users_with_int_birth_date
+  )
+  SELECT
+    user_id, sex, birth_date, age
+  FROM
+    mst_users_with_age
+  ;
+  ```
+- 성별과 연령으로 연령별 구분을 계산하는 쿼리
+  ```sql
+  WITH
+  mst_users_with_int_birth_date AS (
+    ...
+  )
+  , mst_users_with_age AS (
+    ...
+  )
+  , mst_users_with_category AS (
+    SELECT
+      user_id
+      , sex
+      , age
+      , CONCAT (
+        CASE
+          WHEN 20 <= age THEN sex
+          ELSE ''
+        END
+      , CASE
+          WHEN age BETWEEN 4 AND 12 THEN 'C'
+          WHEN age BETWEEN 13 AND 19 THEN 'T'
+          WHEN age BETWEEN 20 AND 34 THEN '1'
+          WHEN age BETWEEN 35 AND 49 THEN '2'
+          WHEN age >= 50 THEN '3'
+        END
+      ) AS category
+    FROM
+      mst_users_with_age
+  )
+  SELECT *
+  FROM
+    mst_users_with_category
+  ;
+  ```
+- `category` 컬럼에서, 연령별 구분 계산
+- 연령이 20살 이상이라면, `M`과 `F`를 출력
+- 이어 나이구분에 따라 `C`, `T`, `1`, `2`, `3` 출력
+- 두 값을 `CONCAT`으로 결합
+- 연령이 3살 이하일 경우
+  - 연령 구분 코드가 `NULL`이 되어, `CONCAT`의 결과도 `NULL`
+- 연령별 구분의 사람 수를 계산하는 쿼리
+  - `PostgreSQL`, `Hive`, `RedShift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  mst_users_with_age AS (
+    ...
+  )
+  , mst_users_with_category AS (
+    ...
+  )
+  SELECT
+    category
+    , COUNT(1) AS user_count
+  FROM
+    mst_users_with_category
+  GROUP BY
+    category
+  ;
+  ```
+
+#### 정리
+- 연령을 단순하게 계산하면, 특징 파악이 어렵기 때문에
+  - `Demographic` 등에 활용하기 힘듦
+- 그에 따라 서비스별 `M1`, `F1`처럼
+  - 사용자 속성을 정의하는 것이 적절하지 않을 수 있음
+- 이럴 때는 독자적으로 새로운 기준을 정의하기
+  - `CASE` 식 부분 변경 등
+
+### 연령별 구분의 특징 추출
