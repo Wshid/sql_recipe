@@ -313,3 +313,187 @@
   - `CASE` 식 부분 변경 등
 
 ### 연령별 구분의 특징 추출
+- 서비스의 사용 형태가
+  - 사용자 속성에 따라 다르다는 것을 확인하면
+  - 상품 또는 기사를 **사용자 속성**에 맞게 추천 가능
+- 이전 절의 내용인 **연령별 구분**을 사용하여
+  - 각 구매한 상품의 카테고리를 집계하기
+- 연령별 구분과 카테고리를 집계하는 쿼리
+  - `PostgreSQL`, `Hive`, `RedShift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  mst_users_with_int_birth_date AS (
+    ...
+  )
+  , mst_users_with_age AS (
+    ...
+  )
+  , mst_users_with_category AS (
+    ...
+  )
+  SELECT
+    p.category AS product_category
+    , u.category AS user_category
+    , COUNT(*) AS purchase count
+  FROM
+    action_log AS p
+  JOIN
+    mst_users_with_category AS u ON p.user_id = u.user_id
+  WHERE
+    -- 구매 로그만 선택
+    action = 'purchase'
+  GROUP BY
+    p.category, u.category
+  ORDER BY
+    p.category, u.category
+  ;
+  ```
+- 연령별 * 카테고리별을 활용하여 다양한 분석이 가능
+  - M1계층에서 드라마가 인기
+  - 드라마는 모든 계층에서 인기
+  - 액션은 M1 계층에서 인기
+- 연령별 * 카테고리별 vs 카테고리별 * 연령별로 나눠서 분석이 가능함
+
+#### 정리
+- **ABC 분석** 및 **구성비누계**를 리포트에 포함하면
+  - 리포트의 내용 전달성 향상이 가능
+
+### 사용자의 방문 빈도 집계
+- SUM의 윈도 함수 사용
+- 사용자가 일주일 또는 한 달 동안 서비스를 **얼마나 사용하는지**알면 업무 분석에 도움
+- 예시
+  - 뉴스 사이트에서의 방문에 따른 차이
+    - 일주일에 한번만 방문하는 사용자
+    - 매일 방문하는 사용자
+- 서비스를 한 주동안 **며칠 사용**하는 사용자가 몇 명인지 집계
+- 일주일 동안의 사용자 사용 일수와 구성비
+- `action_log` 테이블
+  - 사용자 ID, 액션, 날짜
+  - 사용자 ID별로 `DISTINCT`를 적용하여 사용 일 수 집계
+- 한 주에 며칠 사용되었지는지를 집계하는 쿼리
+  - `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  action_log_with_dt AS (
+    SELECT *
+    -- 타임 스탬프에서 날짜 추출하기
+    -- PostgreSQL, Hive, Redshift, SparkSQL의 경우 substring으로 날짜 추출
+    , substring(stamp, 1, 10) AS dt
+    -- PostgerSQL, Hive, BigQuery, SparkSQL의 경우 substr 사용
+    , substring(stamp, 1, 10) AS dt
+    FROM action_log
+  )
+  , action_day_count_per_user AS (
+    SELECT
+      user_id
+      , COUNT(DISTINCT dt) AS action_day_count
+    FROM
+      action_log_with_dt
+    WHERE
+      -- 2016년 11월 1일부터 11월 7일까지의 한 주 동안을 대상으로 지정
+      dt BETWEEN '2016-11-01' AND '2016-11-07'
+    GROUP BY
+      user_id
+  )
+  SELECT
+    action_day_count
+    , COUNT(DISTINCT user_id) AS user_count
+  FROM
+    action_day_count_per_user
+  GROUP BY
+    action_day_count
+  ORDER BY
+    action_day_count
+  ;
+  ```
+- 구성비와 구성비누계를 계산하는 쿼리
+  ```sql
+  WITH
+  action_day_count_per_user AS (
+    ...
+  )
+  SELECT
+    action_day_count
+    , COUNT(DISTINCT user_id) AS user_count
+
+    -- 구성비
+    , 100.0
+      * COUNT(DISTINCT user_id)
+      / SUM(COUNT(DISTINCT user_id)) OVER() AS composition_ratio
+    
+    -- 구성비누계
+    , 100.0
+      * SUM(COUNT(DISTINCT user_id))
+        OVER(ORDER BY action_day_count
+          ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+      / SUM(COUNT(DISTINCT user_id)) OVER() AS cumulative_ratio
+  FROM
+    action_day_count_per_user
+  GROUP BY
+    action_day_count
+  ORDER BY
+    action_day_count
+  ;
+  ```
+
+### 벤 다이어그램으로 사용자 액션 집계하기
+- `SIGN` 함수, `SUM` 함수, `CASE` 식, `CUBE` 구문
+- 여러 기능의 사용 현황을 조사한 뒤
+  - 제공하는 기능을 사용자가 받아들이는지,
+  - 예상대로 사용하는지 확인
+- 벤 다이어그램으로 표현하기
+  - `purchase`, `review`, `favorite`이라는 3개의 액션을 행한 로그가 존재하는지를
+    - `0`과 `1` 플래그로 표기
+- 사용자의 액션 플래그를 집계하는 쿼리
+  - `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  user_action_flag AS (
+    -- 사용자가 액션을 했으면 1, 하지 않았을 경우 0 플래그
+    SELECT
+      user_id
+      , SIGN(SUM(CASE WHEN action = 'purchase' THEN 1 ELSE 0 END)) AS has_purchase
+      , SIGN(SUM(CASE WHEN action = 'review' THEN 1 ELSE 0 END)) AS has_review
+      , SIGN(SUM(CASE WHEN action = 'favorite' THEN 1 ELSE 0 END)) AS has_favorite
+    FROM
+      action_log
+    GROUP BY
+      user_id
+  )
+  SELECT *
+  FROM user_action_flag;
+  ```
+- 대부분의 리포트 도구에는
+  - 위 쿼리의 결과 데이터를 파일로 입력하면, 벤 다이어그램으로 만들어주는 기능이 있음
+- 벤 다이어 그램에 필요한 데이터 집계하기
+- 구매 액션만 한 사용자 수 또는 구매와 리뷰 액션을 한 사용자 수처럼
+  - **하나 액션** 또는 **두개의 액션**을 한 사용자가 몇명인지 계산 필요
+- 표준 SQL에 정의되어 있는 `CUBE` 구문 사용하면 쉽게 계산 가능
+- `CUBE`구문을 사용하여 모든 액션 조합에 대한 사용자 수를 세는 쿼리
+  - 단, `PostgreSQL`만 CUBE 구문이 구현 됨
+- 모든 액션 조합에 대한 사용자 수 계산
+  - `PostgreSQL`
+  ```sql
+  WITH
+  user_action_flag AS (
+    ...
+  )
+  , action_venn_diagram AS (
+    -- cube를 사용하여 모든 액션 조합 구하기
+    SELECT
+      has_purchase
+      , has_review
+      , has_favorite
+      , COUNT(1) AS users
+    FROM
+      user_action_flag
+    GROUP BY
+      CUBE(has_purchase, has_revicew, has_favorite)
+  )
+  SELECT *
+  FROM action_venn_diagram
+  ORDER BY
+    has_purchase, has_review, has_favorite
+  ;
+  ```
+  
