@@ -756,3 +756,268 @@
   - 만약 메일 매거진을  이미 보내고 있다면,
     - 메일 매거진을 보낼 때 추가적인 데이터를 수집하여,
     - 해당 그룹에 해당하는 사람들의 속성 관련 데이터를 더 수집하고 활용 가능
+
+### RFM 분석으로 사용자를 3가지 관점의 그룹으로 나누기
+- `CASE`식, `generate_series` 함수
+- `Decile 분석`의 문제
+  - 검색 기간이 너무 길면,
+    - 과거에는 우수고객이었어도,
+    - 현재에는 다른 서비스를 사용하는 휴면 고객이 포함될 수 있음
+  - 반대로, 검색기간이 단기간이라면
+    - 정기적으로 구매하는 안정 고객이 포함되지 않고,
+    - 해당 기간 동안에만 일시적으로 많이 구매한 사용자가, 우수 고객 취급
+- `RFM 분석`은 `Decile` 분석보다도, 자세하게사용자를 그룹으로 나눌 수 있는 방법
+
+#### RFM 분석의 3가지 지표 집계
+- **Recency** : 최근 구매일
+  - 최근 무언가를 **구매한 사용자**를 우량 고객으로 취급
+- **Frequency** : 구매 횟수
+  - 사용자가 구매한 횟수를 세고, 많을수록 우량 고객으로 취급
+-  **Monetary** : 구매 금액 합계
+   - 사용자의 구매 금액 합계를 집계하고, 금액이 높을수록 우량 고객
+
+#### RFM 집계 쿼리
+- 사용자별로 FRM을 집계하는 쿼리
+  - `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  purchase_log AS (
+    SELECT
+      user_id
+      , amount
+      -- timestamp를 기반으로 날짜 추출
+      -- PostgreSQL, Hive, Redshift, SparkSQL, substring 날짜 추출
+      , substring(stamp, 1, 10) AS dt
+      -- PostgreSQL, Hive, BigQuery, SparkSQL, substr 사용
+      , substr(stamp, 1, 10) AS dt
+    FROM
+      action_log
+    WHERE
+      action = 'purchase'
+  )
+  , user_rfm AS (
+    SELECT
+      user_id
+      , MAX(dt) AS recent_date
+      -- PostgreSQL, Redshift, 날짜 형식간 빼기 연산 가능
+      , CURRENT_DATE - MAX(dt::date) AS recency
+      -- BigQuery, date_diff 함수
+      , date_diff(CURRENT_DATE, date(timestamp(MAX(dt))), day) AS recency
+      -- Hive, SparkSQL, datediff 함수
+      , datediff(CURRENT_DATE(), to_date(MAX(dt))) AS recency
+      , COUNT(dt) AS frequency
+      , SUM(amount) AS mometary
+    FROM
+      purchase_log
+    GROUP BY
+      user_id
+  )
+  SELECT *
+  FROM
+    user_rfm
+  ```
+
+#### RFM 랭크 정의하기
+- **RFM 분석**에서는 **3개의 지표**를 각각 **5개의 그룹**으로 나누는게 일반 적
+- 총 125개의 그룹으로 사용자를 나눠 파악
+- 단계 정의
+  >**랭크**|**R: 최근 구매일**|**F: 누적 구매 횟수**|**M: 누계 구매 금액**
+  >-----|-----|-----|-----
+  >5|14일 이내|20회 이상|300만원 이상
+  >4|28일 이내|10회 이상|100만원 이상
+  >3|60일 이내|5회 이상|30만원 이상
+  >2|90일 이내|2회 이상|5만원 이상
+  >1|91일 이상|1회|5만원 미만
+- 사용자들의 RFM 랭크를 계산하는 쿼리
+  - `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  user_rfm AS (
+    ...
+  )
+  , user_rfm_rank AS (
+    SELECT
+      user_id
+      , recent_date
+      , recency
+      , frequency
+      , monetary
+      , CASE
+          WHEN recency < 14 THEN 5
+          WHEN recency < 28 THEN 4
+          WHEN recency < 60 THEN 3
+          WHEN recency < 90 THEN 2
+        ELSE 1
+        END AS r
+      , CASE
+          WHEN 20 <= frequency THEN 5
+          WHEN 10 <= frequency THEN 4
+          WHEN 5 <= frequency THEN 3
+          WHEN 2 <= frequency THEN 2
+          WHEN 1 <= frequency THEN 1
+        END AS f
+      , CASE
+          WHEN 300000 <= monetary THEN 5
+          WHEN 100000 <= monetary THEN 4
+          WHEN 30000 <= monetary THEN 3
+          WHEN 5000 <= monetary THEN 2
+        ELSE 1
+        END AS m
+  )
+  SELECT *
+  FROM
+    user_rfm_rank
+  ;
+  ```
+- 각 그룹의 사람 수를 확인하는 쿼리
+  - `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  user_rfm AS (
+    ...
+  )
+  , user_rfm_rank AS (
+    ...
+  )
+  , mst_rfm_index AS (
+    -- 1부터 5까지의 숫자를 가지는 테이블
+    -- PostgreSQL, generate_series 함수 등으로 대체 가능
+    SELECT 1 AS rfm_index
+    UNION ALL SELECT 2 AS rfm_index
+    UNION ALL SELECT 3 AS rfm_index
+    UNION ALL SELECT 4 AS rfm_index
+    UNION ALL SELECT 5 AS rfm_index
+  )
+  , rfm_flag AS (
+    SELECT
+      m.rfm_index
+      , CASE WHEN m.rfm_index = r.r THEN 1 ELSE 0 END AS r_flag
+      , CASE WHEN m.rfm_index = r.f THEN 1 ELSE 0 END AS f_flag
+      , CASE WHEN m.rfm_index = r.m THEN 1 ELSE 0 END AS m_flag
+    FROM
+      mst_rfm_index AS m
+    CROSS JOIN
+      user_rfm_rank AS r
+  )
+  SELECT
+    rfm_index
+    , SUM(r_flag) AS r
+    , SUM(f_flag) AS f
+    , SUM(m_flag) AS m
+  FROM
+    rfm_flag
+  GROUP BY
+    rfm_index
+  ORDER BY
+    rfm_index DESC
+  ```
+- 극단적으로 적은 사용자 수의 그룹이 발생한다면, **RFM 랭크 정의**를 수정해야 함
+- 총 125개의 그룹을 3차원으로 보았을 때
+  - 우량 고객 : RFM
+  - 신규 우량 고객 : RfM
+  - 신규 고객 : Rfm
+  - 안정 고객 : RFMrfm
+  - 이탈 고객 : rfFM
+  - 비우량 고객 : rfm
+    - 각 수치가 클 경우 **대문자**, 적을 경우 **소문자**
+      - **대/소문자**가 모두 존재할경우 중간을 의미
+
+#### 사용자를 1차원으로 구분하기
+- **RFM 분석**을 3차원으로 표현하면, 125개의 그룹이 발생하므로
+  - 관리하기 매우 어려움
+- RFM의 각 랭크 합계를 기반으로 **13개의 그룹**으로 나누어 관리하기
+- `R+F+M` 값을 **통합 랭크**로 계산하는 쿼리
+  >**통합 랭크**|**R**|**F**|**M**|**사용자 수**
+  >:-----:|:-----:|:-----:|:-----:|:-----:
+  >15|5|5|5|9
+  >14|5|5|4|13
+  > |5|4|5|15
+  > |4|5|5|15
+  >13|5|5|3|16
+  >…|…|…|…|…
+  >3|1|1|1|842
+- 통합 랭크를 계산하는 쿼리
+  - `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  user_rfm AS (
+    ...
+  )
+  , user_rfm_rank AS (
+    ...
+  )
+  SELECT
+    r + f + m AS total_rank
+    , r, f, m
+    , COUNT(user_id)
+  FROM
+    user_rfm_rank
+  GROUP BY
+    r, f, m
+  ORDER BY
+    total_rank DESC, r DESC, F DESC, m DESC;
+  ```
+- 종합 랭크별로 사용자 수를 집계하는 쿼리
+  - `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  user_rfm AS (
+    ...
+  )
+  , user_rfm_rank AS (
+    ...
+  )
+  SELECT
+    r + f + m AS total_rank
+    , COUNT(user_id)
+  FROM
+    user_rfm_rank
+  GROUP BY
+    -- PostgreSQL, Redshift, BigQuery
+    -- SELECT 구문에서 정의한 별칭을 GROUP BY 구문에 지정 가능
+    total_rank
+    -- PostgreSQL, Hive, Redshift, SparkSQL의 경우
+    -- SELECT 구문에서 별칭을 지정하기 전의 식을 GROUP BY 구문에 지정할 수 있음
+    -- r + f + m
+  ORDER BY
+    total_rank DESC;
+  ```
+
+#### 2차원으로 사용자 인식하기
+- **RFM 지표** 2개를 사용하여 사용자 층을 정의하는 방법
+- 각 사용자 층에 대해 어떤 **마케팅 대책**을 실시할지,
+  - 각 사용자 층을 **상위 사용자 층**으로 어떻게 옮길지를 생각할 수 있음
+- **R**, **F**를 사용해 집계하는 방법
+  >R/F|**20회 이상**|**10회 이상**|**5회 이상**|**2회 이상**|**1회**
+  >:-----:|:-----:|:-----:|:-----:|:-----:|:-----:
+  >14일 이내|단골| | |신규|신규
+  >28일 이내| |안정|안정| | 
+  >60일 이내|단골 이탈 전조|단골 이탈 전조| |신규 이탈 전조|신규 이탈 전조
+  >90일 이내| | | |신규 이탈|신규 이탈
+  >91일 이상|단골/안정 이탈|단골/안정 이탈|단골/안정 이탈|신규 이탈|신규 이탈
+- R과 F를 사용해 2차원 사용자 층의 사용자 수를 집계하는 쿼리
+  - `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  user_rfm AS (
+    ...
+  )
+  , user_rfm_rank AS (
+    ...
+  )
+  SELECT
+    CONCAT('r_', r) AS r_rank
+    -- BigQuery의 경우 CONCAT 함수의 매개 변수를 string으로 변환해야 함
+    , CONCAT('r_', CAST(r as string)) AS r_Rank
+    , CONCAT(CASE WHEN f = 5 THEN 1 END) AS f_5
+    , CONCAT(CASE WHEN f = 4 THEN 1 END) AS f_4
+    , CONCAT(CASE WHEN f = 3 THEN 1 END) AS f_3
+    , CONCAT(CASE WHEN f = 2 THEN 1 END) AS f_2
+    , CONCAT(CASE WHEN f = 1 THEN 1 END) AS f_1
+  FROM
+    user_rfm_rank
+  GROUP BY
+    r
+  ORDER BY
+    r_rank DESC;
+  ```
