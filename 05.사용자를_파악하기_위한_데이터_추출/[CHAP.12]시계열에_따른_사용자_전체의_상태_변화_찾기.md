@@ -362,5 +362,189 @@
   GROUP BY
     register_date, index_name
   ORDER BY
-    register_Date, index_name
+    register_date, index_name
   ```
+- n일 지속률를 계산하기 위해 필요한 **판정 기간의 로그**가 존재하지 않는 경우
+  - 지표는 `NULL`로 출력 됨
+
+### 정착률 관련 리포트
+- 정착률에 대한 리포트, 리포트 작성하기 위한 SQL
+
+#### 매일의 n일 정착률 추이
+- 대책이 의도한 대로의 효과가 있는지 확인하려면
+  - **정착률**을 매일 집계한 리포트가 필요
+- **7일 정착률**이 극단적으로 낮은 경우에는
+  - 정착률이 아니라,
+  - **다음날 지속률 ~ 7일 지속률**을 확인해서 문제를 검토하는 것이 일반적
+- **정착률**을 산출할 경우,
+  - 대상이 되는 기간이 **여러 일자**에 걸쳐 있으므로,
+  - `repeat_interval` 테이블의 `interval_date`를
+    - `interval_begin_date`
+    - `interval_end_date`로 확장해야 함
+- 정착률 지표를 관리하는 마스터 테이블을 작성하는 쿼리
+  - `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  repeat_interval(index_name, interval_begin_date, interval_end_date) AS (
+    -- PostgreSQL, VALUES 구문으로 일시 테이블 생성
+    -- Hive,Redshift, BigQuery, SparkSQL, UNION ALL 등으로 대체 가능
+    -- 8-5
+    VALUES
+      ('07 day retention', 1, 7)
+      , ('14 day retention', 8, 14)
+      , ('21 day retention', 15, 21)
+      , ('28 day retention', 22, 28)
+  )
+  SELECT *
+  FROM repeat_interval
+  ORDER BY index_name
+  ;
+  ```
+- 정착률을 계산하는 쿼리
+  - `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  repeat_interval AS (
+    ...
+  )
+  , action_log_with_index_date AS (
+    SELECT
+      u.user_id
+      , u.register_date
+      -- 액션의 날짜와 로그 전체의 최신 날짜를 날짜 자료형으로 변환
+      , CAST(a.stamp AS date) AS action_date
+      , MAX(CAST(a.stamp AS date)) OVER() AS latest_date
+      -- BigQuery, 한 번 타임 스탬프 자료형으로 변환하고, 날짜 자료형으로 변환
+      , date(timestamp(a.stamp)) AS action_date
+      , MAX(date(timestamp(a.stamp))) OVER() AS latest_date
+      , r.index_name
+
+      -- 지표의 대상 기간 시작일 / 종료일 계산
+      -- PostgreSQL
+      , CAST(u.register_date::date + '1 day'::interval * r.interval_begin_date AS date) AS index_begin_date
+      , CAST(u.register_date::date + '1 day'::interval * r.interval_end_date AS date) AS index_end_date
+      -- Redshift
+      , dateadd(day, r.interval_begin_date, u.register_date::date) AS index_begin_date
+      , dateadd(day, r.interval_end_date, u.register_date::date) AS index_end_date
+      -- BigQuery
+      , date_add(CAST(u.register_date AS date), interval r.interval_begin_date day) AS index_begin_date
+      , date_add(CAST(u.register_date AS date, interval r.index_end_date day)) AS index_end_date
+      -- Hive, SparkSQL
+      , date_add(CAST(u.register_date AS date), r.interval_begin_date) AS index_begin_date
+      , date_add(CAST(u.register_date AS date), r.interval_end_date) AS index_end_date)
+    FROM
+      mst_users AS u
+      LEFT OUTER JOIN action_log AS a 
+      ON u.user_id = a.user_id
+      CROSS JOIN
+        repeat_interval AS r 
+  )
+  , user_action_flag As (
+    SELECT
+      user_id
+      , register_date
+      , index_name
+      -- 지표의 대상 기간에 액션을 했는지 플래그 판단
+      , SIGN(
+        -- 사용자별 대상 기간에 한 액션의 합 구하기
+          SUM(
+            -- 대상 기간의 종료일이, 로그 최신날짜 이전인지 판단
+            CASE WHEN index_end_Date <= latest_date THEN
+              -- 지표의 대상 기간안에 액션을 했다면 1 아니면 0
+              CASE WHEN action_date BETWEEN index_begin_date AND index_end_date
+                THEN 1 ELSE 0
+              END
+            END
+          )
+      ) AS index_date_action
+    FROM
+      action_log_with_index_date
+    GROUP BY
+      user_id, register_date, index_name, index_begin_date, index_end_date
+  )
+  SELECT
+    register_date
+    , index_name
+    , AVG(100.0 * index_date_action) AS index_rate
+  FROM
+    user_action_flag
+  GROUP BY
+    register_date, index_name
+  ORDER BY
+    register_date, index_name
+  ```
+
+### n일 지속률과 n일 정착률의 추이
+- **n일 지속률**과 **n일 정착률**을 따로 집계하면
+  - 등록 후 며칠간, 사용자가 안정적으로 서비스를 사용하는지,
+  - 며칠 후에 서비스를 그만두는 사용자가 많아지는지
+    - 를 파악 가능함
+- **지속률**과 **정착률**이 극단적으로 떨어지는 시점이 있다면
+  - 해당 시점을 기준으로 공지사항 등을 전달하거나
+  - `n일 이상` 사용한 사용자에게 보너스를 주는 등의 대첵을 이행하여
+    - 지속률과 정착률이 다시 안정적으로 돌아오는 날까지, 사용자를 잡을 수 있음
+- **정착률**을 계산하기 위해 만들었던,
+  - `repeat_interval` 테이블의 형식을 수정하면
+  - **지속률**도 계산 가능
+- 지속률 지표를 관리하는 마스터 테이블을 정착률 형식으로 수정한 쿼리
+  - `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  repeat_interval(index_name, interval_begin_date, interval_end_date) AS (
+    -- PostgreSQL, VALUES로 일시 테이블 생성 가능
+    -- Hive, Redshift, BigQuery, SparkSQL의 경우 UNION ALL 대체 가능
+    VALUES
+      ('01 day repeat'      , 1, 1)
+      , ('02 day repeat'    , 2, 2)
+      , ('03 day repeat'    , 3, 3)
+      , ('04 day repeat'    , 4, 4)
+      , ('05 day repeat'    , 5, 5)
+      , ('06 day repeat'    , 6, 6)
+      , ('07 day repeat'    , 7, 7)
+      , ('07 day retention' , 1, 7)
+      , ('14 day retention' , 8, 14)
+      , ('21 day retention' , 15, 21)
+      , ('28 day retention' , 22, 28)
+  )
+  SELECT *
+  FROM repeat_interval
+  ORDER BY index_name
+  ;
+  ```
+- n일 지속률들을 집계하는 쿼리
+  - `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  repeat_interval AS (
+    ...
+  )
+  , action_log_with_index_date AS (
+    ...
+  )
+  , user_action_flag AS (
+    ...
+  )
+  SELECT
+    index_name
+    , AVG(100.0 * index_date_action) AS repeat_rate
+  FROM
+    user_action_flag
+  GROUP BY
+    index_name
+  ORDER BY
+    index_name
+  ```
+
+#### 원포인트
+- **지속률**과 **정착률**은 모두
+  - **등록일**기준으로 `n`일 후의 행동을 집계
+- 따라서 **등록일**로부터 `n`일 경과하지 않는 상태라면, 집계꺄ㅏ 불가능
+- 그러므로 `30일 지속률`과 `60일 지속률`처럼
+  - 값을 구하기 위해 시간이 오래 걸리는 지표보다는
+  - `1일 지속률`, `7일 지속률`, `7일 정착률`처럼
+    - **단기간**에 결과를 보고 대책을 세울 수 있는 지표를 활용하는 것이 좋음
+- **정착률**은 `7일`동안의 기간을 집계하므로
+  - 실제로 며칠 사용했는지는 알 수 없음
+- 예시로
+  - `14일`의 정착률 기간 동안 70% 사용자는 1~2일 정도에 그친다 등을 알고 싶다면
+  - `5-4`에서 확인했던 SQL을 다시 볼 것
