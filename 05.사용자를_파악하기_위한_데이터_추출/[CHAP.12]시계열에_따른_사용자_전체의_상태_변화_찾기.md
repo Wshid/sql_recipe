@@ -548,3 +548,182 @@
 - 예시로
   - `14일`의 정착률 기간 동안 70% 사용자는 1~2일 정도에 그친다 등을 알고 싶다면
   - `5-4`에서 확인했던 SQL을 다시 볼 것
+
+### 지속과 정착에 영향을 주는 액션 집계하기
+- 지속률과 정착률의 추이를 계산하여 사용자의 상황을 이해하는 것도 중요하지만
+  - **무엇 때문에** 그러한 추이가 발생하는지 모르면 대책 세우기가 어려움
+- 지표와 리포트를 만들때 **OO율을 올리자** 처럼 새로운 목표와 과제가 있어야 하며
+  - 그 목표를 위해 무엇을 해야할지 구체적인 **대책** 제시가 필요
+- **OO하는 사용자는 무엇에 영향을 주는지**에 대해 구하는 방법
+
+#### 1일 지속률을 개선하기
+- **1일 지속률**을 개선하려면
+  - 등록한 당일 사용자들이 무엇을 했는지 확인하면 됨
+- **14일 정착률**을 개선하려면
+  - 7일 정착률의 판정 기간 동안, 사용자가 어떤 행동을 했는지를 조사
+- 1일 지속률을 개선하기 위해
+  - **등록일의 액션 사용 여부**와 **1일 지속률**에 어떤 차이가 있는지를 집계
+  - `profile_regist`, `tutorial-step1`, ...
+  - 이 액션 마다의
+    - 사용자 수, 사용률, 사용자 1일 지속률, 비사용자 1일 지속률
+  - 1일 지속률에 더 영향을 주는 주요 포인트
+    - **사용자**의 1일 지속률이 높고
+    - **비사용자**의 1일 지속률이 낮을 경우
+  - 사용자 영향을 많이 주는 **액션의 사용률이 낮다면**
+    - 사용자들이 해당 액션을 할 수 있게 **설명**을 추가하거나
+    - 이벤트를 통해 **액션 사용**을 촉진하고,
+      - 사이트의 디자인/동선도 같이 검토해야 함
+- 각 액션에 대한 **사용자**와 **비사용자**의 다음날 지속률을 한번에 계싼하려면
+  - 모든 사용자의 **모든 액션 조합**을 생성한 후
+    - 사용자의 액션 실행 여부를 `0/1`로 나타내는 테이블을 만들어 집계
+- 모든 사용자와 액션의 조합 만들기
+  - **사용자 마스터 테이블**과 **액션 마스터 테이블**을 `CROSS JOIN`하기
+- 모든 사용자와 액션의 조합을 도출하는 쿼리
+  - `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  repeat_interval(index_name, interval_begin_Date, interval_end_date) AS (
+    -- PostgreSQL의 경우 VALUES로 일시 테이블 생성 가능
+    -- Hive, Redshift, Bigquery, SparkSQL의 경우 SELECT로 대체 가능
+    -- 4.5 참고
+    VALUES ('01 day repeat', 1, 1)
+  )
+  , action_log_with_index_Date AS (
+    ...
+  )
+  , user_action_flag AS (
+    ...
+  )
+  , mst_actions AS (
+    SELECT 'view' AS action
+    UNION ALL SELECT 'comment' AS action
+    UNION ALL SELECT 'follow' AS action
+  )
+  , mst_user_actions AS (
+    SELECT
+      u.user_id
+      , u.register_date
+      , a.action
+    FROM
+      mst_users AS u
+      CROSS JOIN
+        mst_actions AS a
+  )
+  SELECT *
+  FROM mst_user_actions
+  ORDER BY user_id, action
+  ;
+  ```
+- 사용자의 액션 로그를 0/1 플래그로 표현하는 쿼리
+  - `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  repeat_interval AS (
+    ...
+  )
+  , action_log_with_index_date AS (
+    ...
+  )
+  , user_action_flag AS (
+    ...
+  )
+  , mst_actions AS (
+    ...
+  )
+  , mst_user_actions AS (
+    ...
+  )
+  , register_action_flag AS (
+    SELECT DISTINCT
+      m.user_id
+      , m.register_date
+      , m.action
+      , CASE
+          WHEN a.action IS NOT NULL THEN 1
+          ELSE 0
+        END AS do_action
+      , index_name
+      , index_date_action
+    FROM
+      mst_user_actions AS m
+      LEFT JOIN
+        action_log AS a
+        ON m.user_id = a.user_id
+        AND CAST(m.register_date AS date) = CAST(a.stamp AS date)
+        -- BigQuery, Timestamp 자료형으로 변환한 뒤, 날짜 자료형으로 변환
+        AND CAST(m.regsiter_date AS date) = date(timestamp(a.stamp))
+        AND m.action = a.action
+      LEFT JOIN
+        user_action_flag AS f
+        ON m.user_id = f.user_id
+    WHERE
+      f.index_date_action IS NOT NULL
+  )
+  SELECT *
+  FROM register_action_flag
+  ORDER BY user_id, index_name, action
+  ;
+  ```
+- 실행 결과 형태
+  >**user\_id**|**register\_date**|**action**|**do\_action**|**index\_name**|**index\_date\_action**
+  >:-----:|:-----:|:-----:|:-----:|:-----:|:-----:
+  >U001|2016.10.1|comment|0|01 day repeat|1
+  >U001|2016.10.1|follow|1|01 day repeat|1
+  >U002|2016.10.1|comment|0|01 day repeat|1
+- `U001`의 경우, 2016-10-01에 `follow` 액션을 수행,
+  - 다음날 지속률 판정 기간(1일) 동안, `comment`, `follow`를 수행했다는 의미
+- 사용자의 액션로그가 `0/1`로 표현되었다면
+  - 전제 조건에 따라 비율을 `AVG` 함수로 계산
+- 등록일에 해당 액션을 사용한 사용자는 `do_action = 1`이며,
+  - 등록일에 해당 액션을 사용하지 않은 사용자는 `do_action = 0`으로 구분
+- 이를 활용하여 **사용자**와 **비사용자**기반으로
+  - `index_date_action`의 평균을 계산하면, **1일 지속률**을 구할 수 있음
+- 액션에 따른 지속률과 정착률을 집계하는 쿼리
+  - `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  repeat_interval AS (
+    ...
+  )
+  , action_log_with_index_date AS (
+    ...
+  )
+  , user_action_flag AS (
+    ...
+  )
+  , mst_actions(action) AS (
+    ...
+  )
+  , mst_user_actions AS (
+    ...
+  )
+  , register_action_flag AS (
+    ...
+  )
+  SELECT
+    action
+    , COUNT(1) users
+    , AVG(100.0 * do_action) AS usage_rate
+    , index_name
+    , AVG(CASE do_action WHEN 1 THEN 100.0 * index_date_action END) AS idx_rate
+    , AVG(CASE do_action WHEN 0 THEN 100.0 * index_date_action END) AS no_action_idx_rate
+  FROM
+    register_action_flag
+  GROUP BY
+    index_name, action
+  ORDER BY
+    index_name, action
+  ``` 
+- 실행 결과
+  >**action**|**users**|**usage\_rate**|**index\_name**|**idx\_rate**|**no\_action\_idx\_rate**
+  >:-----:|:-----:|:-----:|:-----:|:-----:|:-----:
+  >comment|28|7.14|01 day repeat|0.00 |15.38
+  >follow|28|7.14|01 day repeat|50.00 |11.53
+  >view|28|100|01 day repeat|14.28 | 
+
+#### 원포인트
+- 특정 액션의 실행이 지속률과 정착률 상승으로 이어질 것으로 보여도
+  - 해당 액션을 실행하는 **진입 장벽**이 높다면,
+  - 지속률과 정착률에 조금 영향을 주더라도, 액션을 실행하는 진입 장벽이 **낮은** 쪽으로 대책을 세우는 것이 좋음
+    - ex) 동영상 업로드 보다는 이미지 업로드 촉진 등
+- 액션 여부뿐 아니라, **액션 수**에 따라서도 차이가 있을 수 있음
