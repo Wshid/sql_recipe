@@ -727,3 +727,188 @@
   - 지속률과 정착률에 조금 영향을 주더라도, 액션을 실행하는 진입 장벽이 **낮은** 쪽으로 대책을 세우는 것이 좋음
     - ex) 동영상 업로드 보다는 이미지 업로드 촉진 등
 - 액션 여부뿐 아니라, **액션 수**에 따라서도 차이가 있을 수 있음
+
+### 액션 수에 따른 정착률 집계하기
+- `CROSS JOIN`, `CASE`, `AVG`
+- SNS 사례
+  - 페이스북과 트위터 등 대표적인 SNS 사례 중
+  - `등록 후 1주일 이내에 10명을 팔로우하면, 해당 사용자는 서비스를 계속해서 사용한다`
+    - 알 수도 있는 사람
+    - 00님을 함께 알고 있습니다 등의 마케팅을 하는 이유
+  - 인기 사용자를 팔로우하는 튜토리얼을 만들어, **서비스 활성화**를 유도
+- 등록일과, 이후 7일 동안(**7일 정착률 기간**)에
+  - 실행한 액션 수에 따라 14일 정착률이 어떻게 변화하는지 확인
+- 특정 기간동안의 **액션수 집계** 이후
+  - 달성한 사람의 14일 정착률을 집계한다.
+- 최종적으로, 각 액션별로 도수 분포표를 만들고,
+  - 달성자의 14일 정착률을 집계
+- **액션 단계 마스터**를 일시 테이블로 정의
+  - `CROSS JOIN`을 사용하여, **사용자와 액션 조합** 구성
+- 액션의 계급 마스터와 사용자 액션 플래그의 조합을 산출하는 쿼리
+  - `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  repeat_interval(index_name, interval_begin_date, interval_end_date) AS (
+    -- PostgreSQL의 경우 VALUES로 일시 테이블 생성 가능
+    -- Hive, Redshift, BigQuery, SparkSQLL의 경우 SELECT로 ㄷ ㅐ체 가능
+    -- 8강 5절
+    VALUES ('14 day retention', 8, 14)
+  )
+  , action_log_with_index_date AS (
+    -- 12-10 코드
+  )
+  , user_action_flag AS (
+    -- 12-10 코드
+  )
+  , mst_action_bucket(action, min_count, max_count) AS (
+    -- 액션 단계 마스터
+    VALUES
+      ('comment', 0, 0)
+      , ('comment', 1, 5)
+      , ('comment', 6, 10)
+      , ('comment', 11, 9999) -- 최댓값으로 간단하게 9999 입력
+      , ('follow', 0, 0)
+      , ('follow', 1, 5)
+      , ('follow', 6, 10)
+      , ('follow', 11, 9999) --최댓값으로 간단하게 9999 입력
+  )
+  , mst_user_action_bucket AS (
+    -- 사용자 마스터와 액션 단계 마스터 조합
+    SELECT
+      u.user_id
+      , u.register_date
+      , a.action
+      , a.min_count
+      , a.max_count
+    FROM
+      mst_users AS u
+      CROSS JOIN
+        mst_action_bucket AS a
+  )
+  SELECT *
+  FROM
+    mst_user_action_bucket
+  ORDER BY
+    user_id, action, min_count
+  ```
+- 위 코드 결과에 7일 동안의 로그를 `LEFT JOIN`하고,
+  - 등록 후 7일 동안의 액션수를 집계하는 쿼리 작성
+  - 7일 동안의 로그를 결합할 수 있게 `JOIN`구문 내부에 `BETWEEN`을 사용했지만
+    - 이는 `Hive`에서 동작하지 않음
+    - `Hive`에서는 별도의 `WHERE` 구문을 추가로 사용해야한다.
+- 등록 후 7일 동안의 액션 수를 집계하는 쿼리
+  - `PostgreSQL`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  repeat_interval AS (
+    ...
+  )
+  , action_log_with_index_date AS (
+    ...
+  )
+  , user_action_flag AS (
+    ...
+  )
+  , mst_action_bucket AS (
+    ...
+  )
+  , mst_user_action_bucket AS (
+    ...
+  )
+  , register_action_flag As (
+    -- 등록일에서 7일 후까지 액션수를 세고,
+    -- 액션 단계와 14일 정착 달성 플래그 계산
+    SELECT
+      m.user_id
+      , m.action
+      , m.min_count
+      , m.max_count
+      , COUNT(a.action) AS action_count
+      , CASE
+          WHEN COUNT(a.action) BETWEEN m.min_count AND m.max_count THEN 1
+          ELSE 0
+        END As achieve
+      , index_name
+      , index_date_action
+    FROM
+      mst_user_action_bucket AS m
+      LEFT JOIN
+        action_log AS a
+        ON m.user_id = a.user_id
+        -- 등록일 당일부터 7일 후까지의 액션 로그 결합
+        -- PostgreSQL, Redshift의 경우
+        AND CAST(a.stamp AS date)
+          BETWEEN CAST(m.register_date AS date)
+          AND CAST(m.register_date AS date) + interval '7 days'
+        -- BigQuery의 경우
+        AND date(timestamp(a.stamp))
+          BETWEEN CAST(m.register_date AS date)
+          AND date_add(CAST(m.register_date AS date), interval 7day)
+        -- SparkSQL
+        AND CAST(a.stamp AS date)
+          BETWEEN CAST(m.register_date AS date)
+          AND date_add(CAST(m.register_date AS date), 7)
+        -- Hive의 경우 JOIN 구문에 BETWEEN을 사용할 수 없으므로, WHERE을 사용하여야 함
+        AND m.action = a.action
+      LEFT JOIN
+        user_action_flag AS f
+        ON m.user_id = f.user_id
+      WHERE
+        f.index_date_action IS NOT NULL
+      GROUP BY
+        m.user_id
+        , m.action
+        , m.min_count
+        , m.max_count
+        , f.index_name
+        , f.index_date_action
+  )
+  SELECT *
+  FROM
+    register_action_flag
+  ORDER BY
+    user_id, action, min_count
+  ;
+  ```
+- 앞 코드에서 구한 액션 횟수를 기반으로 **14일 정착률 집계**
+- 등록 후 7일동안의 액션 횟수별로 14일 정착률을 집계하는 쿼리
+  - `PostgreSQL`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  repeat_interval AS (
+    ...
+  )
+  , action_log_with_index_date AS (
+    ...
+  )
+  , user_action_flag AS (
+    ...
+  )
+  , mst_action_bucket AS (
+    ...
+  )
+  , mst_user_action_bucket AS (
+    ...
+  )
+  , register_action_flag AS (
+    ...
+  )
+  SELECT
+    action
+    -- PostgreSQL, Redshift, 문자열 연결
+    , min_count || '~' || max_count AS count_range
+    -- BigQuery
+    , CONCAT(CAST(min_count AS string), '~', CAST(max_count AS string)) AS count_range
+    , SUM(CASE achieve WHEN 1 THEN 1 ELSE 0 END) AS archieve
+    , index_name
+    , AVG(CACSE achieve WHEN 1 THEN 100*0 * index_date_action END) AS achieve_index_date
+  FROM
+    register_action_flag
+  GROUP BY
+    index_name, action, min_count, max_count
+  GROUP BY
+    index_name, action, min_count;
+  ```
+- 사용자의 **액션**을 기반으로 사용자를 집계하는 방법
+- 액션별로 사용자를 집계하면
+  - **사용자가 어떤 기능을 더 많이 사용하도록 유도해야 하는지 파악 가능**
