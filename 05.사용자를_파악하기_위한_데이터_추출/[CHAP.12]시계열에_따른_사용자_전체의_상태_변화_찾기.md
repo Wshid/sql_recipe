@@ -912,3 +912,127 @@
 - 사용자의 **액션**을 기반으로 사용자를 집계하는 방법
 - 액션별로 사용자를 집계하면
   - **사용자가 어떤 기능을 더 많이 사용하도록 유도해야 하는지 파악 가능**
+
+### 사용 일수에 따른 정착률 집계하기
+- `COUNT`, `SUM` 윈도 함수, `AVG`함수
+- 정착률
+- **7일 정착 기간**동안
+  - 사용자가 며칠 사용했는지가
+  - 이후 정착률에 어떠한 영향을 주는지 확인하는 방법
+- 특정 날짜에 등록한 사용자가
+  - `등록 다음날부터 7일 중 며칠을 사용했는지`를 집계하고
+  - `28일 정착률`(등록일 `21`일부터 `28`일 후까지도 사용한 사용자 비율)을 집계
+    - **등록일 다음날부터 7일 이내의 사용일에 따른 28일 정착률**
+- 매일 사용하는 사용자가 당연히 오래 사용하겠으나,
+  - 리포트로 만들면, 이를 수치화해서 근거를 명확하게 제시 가능
+  - 이러한 리포트 활용시, 등록후 7일 동안 사용자가 계속해서 사용하게 만드는 대책을 세울 수 있음
+
+#### 리포트를 만드는 방법
+- 등록일 다음날부터 **7일 동안의 사용 일수** 집계
+- 사용 일수별로 집계한 **사용자 수**와 **구성비**, **구성비누계**를 계산
+- **사용 일수별로 집계한 사용자 수**를 분모로 두고,
+  - **28일 정착률**을 집계한 뒤, 그 비율을 계산
+- 정착률 지표 마스터를 만들고, 내부에 `user_action_flag`를 집계
+  - 이어서 **사용자 마스터**에
+    - **등록일 다음날**부터 **7일 이내의 액션 로그를 결합**
+    - 해당 기간의 사용일 수 계산
+- 등록일 다음날부터 7일 동안의 사용일수와 28일 정착 플래그를 생성하는 쿼리
+  - `PostgreSQL`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  repeat_interval(index_name, interval_begin_date, interval_end_date) AS (
+    -- PostgreSQL은 VALUES로 일시 테이블 생성 가능
+    -- Hive, Redshift, BigQuery, SparkSQL의 경우 SELECT로 대체 가능
+    VALUES ('28 day retention', 22, 28)
+  )
+  , action_log_with_index_date AS (
+    ...
+  )
+  , user_action_flag AS (
+    ...
+  )
+  , register_action_flag AS (
+    SELECT
+      m.user_id
+      , COUNT(DISTINCT CAST(a.stamp AS date)) AS dt_count
+      -- BigQuery의 경우 다음과 같이 사용
+      , COUNT(DISTINCT date(timestamp(a.stamp))) AS dt_count
+      , index_name
+      , index_date_action
+    FROM
+      mst_users AS m
+      LEFT JOIN
+        action_log AS a
+        ON m.user_id = a.user_id
+
+        -- 등록 다음날부터 7일 이내의 액션 로그 결합하기
+        -- PostgreSQL, Redshift의 경우 다음과 같이 사용
+        AND CAST(a.stamp AS date)
+          BETWEEN CAST(m.register_date AS date) + interval '1 day'
+            AND CAST(m.register_date AS date) + interval '8 days'
+        
+        -- BigQuery
+        AND date(timestamp(a.stamp))
+          BETWEEN date_add(CAST(m.register_date AS date), interval 1 day)
+            AND date_add(CAST(m.register_date AS date), interval 8 day)
+
+        -- SparkSQL
+        AND CAST(a.stamp AS date)
+          BETWEEN date_add(CAST(m.register_Date AS date), 1)
+            AND date_add(CAST(m.register_Date AS date), 8)
+        
+        -- Hive, JOIN에 BETWEEN을 사용할 수 없으므로, WHERE 사용
+      LEFT JOIN
+        user_action_flag AS f
+        ON m.user_id = f.user_id
+    WHERE
+      f.index_date_action IS NOT NULL
+    GROUP BY
+      m.user_id
+      , f.index_name
+      , f.index_date_action
+  )
+  SELECT *
+  FROM
+    register_action_flag;
+  ```
+  - 등록일 다음날부터 7일 동안의 사용 일수와, 해당 사용자의 28일 정착 플래그 생성
+- 사용 일수에 따른 정착율을 집계하는 쿼리
+  - `PostgreSQL`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  repeat_interval AS (
+    ...
+  )
+  , action_log_with_index_date AS (
+    ...
+  )
+  , user_action_flag AS (
+    ...
+  )
+  , register_action_flag AS (
+    ...
+  )
+  SELECT
+    dt_count AS dates
+    , COUNT(user_id) AS users
+    , 100.0 * COUNT(user_id) / SUM(COUNT(user_id)) OVER() AS user_ratio
+    , 100.0 *
+      SUM(COUNT(user_id))
+        OVER(ORDER BY index_name, dt_count)
+          ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+      / SUM(COUNT(user_id)) OVER() AS cum_ratio
+    , SUM(index_date_action) AS achieve_users
+    , AVG(100.0 * index_date_action) AS achieve_ratio
+  FROM
+    register_action_flag
+  GROUP BY
+    index_name, dt_count
+  ORDER BY
+    index_name, dt_count;
+  ```
+
+#### 원포인트
+- 등록일 다음날부터 7일 동안의 사용일수를 사용해 집계했지만,
+  - 사용 일수대신 
+    - SNS 서비스에 올린 **글의 개수** 또는 **소셜 게임의 레벨**등으로 대상을 변경하여 사용할 수 있음
