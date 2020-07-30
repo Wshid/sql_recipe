@@ -1036,3 +1036,125 @@
 - 등록일 다음날부터 7일 동안의 사용일수를 사용해 집계했지만,
   - 사용 일수대신 
     - SNS 서비스에 올린 **글의 개수** 또는 **소셜 게임의 레벨**등으로 대상을 변경하여 사용할 수 있음
+
+### 사용자의 잔존율 집계하기
+- `CROSS JOIN`, `SUM(CASE ~)`, `AVG(CASE ~)`
+- 잔존율
+- 서비스 등록 수개월 후에, 어느 정도 비율의 사용자가
+  - 서비스를 지속해서 사용하는지, 대략적으로 파악해두면
+  - 서비스에 어떤 문제가 있는지 찾거나,
+    - 과거와 현재를 비교하고, 미래에 대한 목표 전망 검토가 가능
+- 가로축 - 등록일, 세로 축 - 해당 월의 서비스 사용자수 집계
+
+ |**2016년 1월**|**2016년 2월**|**2016년 3월**|**2016년 4월**|**2016년 5월**|**2016년 6월**
+:-----:|:-----:|:-----:|:-----:|:-----:|:-----:|:-----:
+2016년 1월|100(100%)| | | | | 
+2016년 2월|90(90%)|150(100%)| | | | 
+2016년 3월|80(80%)|120(80%)|120(100%)| | | 
+2016년 4월|70(70%)|90(60%)|90(75%)|200(100%)| | 
+2016년 5월|60(60%)|60(40%)|90(75%)|150(75%)|250(100%)| 
+2016년 6월|50(50%)|30(20%)|30(25%)|100(50%)|125(50%)|220(100%)
+- 위 표의 의미
+  - 이전과 비교해 `n`개월 후의 잔존율이 내려감
+    - 신규 등록자가 서비스를 사용하기 위한 **진입 장벽**이 높아지진 않았는지 확인
+  - n개월 이후에 **잔존율이 갑자기 낮아짐**
+    - 서비스 사용 목적을 달성하는 기간이, 예상보다 너무 짧지는 않은지
+  - 오래 사용하던 사용자인데도, **특정 월**을 기준으로 사용하지 않음
+    - 사용자가 서비스 내부의 경쟁으로 빨리 지친것은 아닌지
+- 사용자의 잔존율을 월단위로 집계하려면,
+  - 사용자의 서비스 등록일로부터 **12개월 후**까지 월을 도출하기 위한 **추가 테이블 필요**
+- 12개월 후까지의 월을 도출하기 위한 보조 테이블 생성 쿼리
+  - `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  mst_intervals(interval_month) AS (
+    -- 12개월 동안의 순번 만들기(generate_series 등으로 대체 가능)
+    -- PostgreSQL의 경우 VALUES 구문으로 일시 테이블 생성
+    -- Hive, Redshift, BigQuery, SparkSQL의 경우 SELECT 구문과 UNION ALL로 대체 가능
+    VALUES (1), (2), (3), (4), (5), (6), (7), (8), (9), (10), (11), (12)
+  )
+  SELECT *
+  FROM mst_intervals
+  ;
+  ```
+- 위 보조 테이블을 사용하여
+  - 사용자의 등록일부터 **12개월 후**까지의 월을 **사용자 마스터**에 추가
+- 이후 **액션 로그**의 **로그 날짜**를 월 단위 표현으로 변경,
+  - 등록 월부터 12개월 후까지의 월을 추가한 **사용자 마스터**와 결합하여 **월 단위 잔존율 집계**
+- 등록 월에서 12개월 후까지의 잔존율을 집계하는 쿼리
+  - `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  mst_intervals AS (
+    ...
+  )
+  , mst_users_with_index_month AS (
+    -- 사용자 마스터에 등록 월부터 12개월 후까지의 월 추가
+    SELECT
+      u.user_id
+      , u.register_date
+      -- n개월 후의 날짜, 등록일, 등록 월 n개월 후의 월 계산
+      -- PostgreSQL의 경우 다음과 같이 사용
+      , CAST(u.register_date::date + i.interval_month * '1 month'::interval AS date) AS index_date
+      , substring(u.register_date, 1, 7) AS register_month
+      , substring(CAST(
+        u.register_date::date + i.interval_month * '1 month'::interval AS text), 1, 7) AS index_month
+      
+      -- Redshift
+      , dateadd(month, i.interval_month, u.register_date::date) AS index_date
+      , substring(u.register_date, 1, 7) AS register_month
+      , substring(
+        CAST(dateadd(month, i.interval_month, u.regsiter_date::date) AS text), 1, 7) AS index_month
+      
+      -- BigQuery
+      , date_add(date(timestamp(u.register_date)), interval i.interval_month month) AS index_date
+      , substr(u.register_date, 1, 7) AS register_month
+      , substr(CAST(
+        date_add(date(timestamp(u.register_date)), interval i.interval_month month) AS string), 1,7) AS index_month
+      
+      -- Hive, SparkSQL
+      , add_month(u.register_date, i.interval_month) AS index_date
+      , substring(u.register_date, 1, 7) AS register_month
+      , substring(
+        CAST(add_months(u.register_date, i.interval_month) AS string), 1, 7) AS index_month
+    FROM
+      mst_users AS u
+      CROSS JOIN
+        mst_intervals AS i
+  )
+  , action_log_in_month AS (
+    -- 액션 로그의 날짜에서 월 부분만 추출
+    SELECT DISTINCT
+      user_id
+      , substring(stamp, 1, 7) AS action_month
+      -- BigQuery의 경우 substr 사용
+      , substr(stamp, 1, 7) AS action_month
+    FROM
+      action_log
+  )
+  SELECT
+    -- 사용자 마스터와 액션 로그를 결합 후, 월별로 잔존율 집계
+    u.register_month
+    , u.index_month
+    -- action_month가 NULL이 아니라면(액션을 했다면) 사용자 수 집계
+    , SUM(CASE WHEN a.action_month IS NOT NULL THEN 1 ELSE 0 END) AS users
+    , AVG(CASE WHEN a.action_month IS NOT NULL THEN 100.0 ELSE 0.0 END) AS retention_rate
+  FROM
+    mst_users_with_index_month AS u
+    LEFT JOIN
+      action_log_in_month AS a
+      ON u.user_id = a.user_id
+      AND u.index_month = a.action_month
+  GROUP BY
+    u.register_month, u.index_month
+  ORDER BY
+    u.register_month, u.index_month
+  ;
+  ```
+
+#### 원포인트
+- 매일 확인해야할 리포트는 아니지만,
+  - **장기적인 관점**에서 **사용자 등록**과 **지속 사용**을 파악할 때는 유용하게 활용 가능
+- 이런 리포트를 작성할 때는
+  - 해당 **월**에 실시한 대책 또는 캠페인 등의 **이벤트를 함께 기록**하면,
+  - 수치 변화의 원인 등도 쉽게 파악이 가능
