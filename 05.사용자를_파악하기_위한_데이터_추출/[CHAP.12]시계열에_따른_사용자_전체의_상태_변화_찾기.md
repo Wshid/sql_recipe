@@ -1158,3 +1158,110 @@
 - 이런 리포트를 작성할 때는
   - 해당 **월**에 실시한 대책 또는 캠페인 등의 **이벤트를 함께 기록**하면,
   - 수치 변화의 원인 등도 쉽게 파악이 가능
+
+### 방문 빈도를 기반으로 사용자 속성을 정의하고 집계하기
+- `CASE`식, `NULLIF`, `LAG`
+- `MAU`, 리피트, 컴백
+- 서비스 사용자의 방문 빈도를 **월 단위**로 파악하고,
+  - 방문 빈도에 따라 **사용자 분류** 후 내역을 집계하는 방법
+
+#### MAU
+- 특정 월에 서비스를 사용한 사용자 수를 **MAU**(Monthly Active User)라고 함
+- 단, `이번 달의 MAU는 30만이다`라고 하더라도,
+  - 30만명중에 몇명이 **신규 사용자**인지는 확인할 수 없음
+- 이런 내역에 따라 **서비스의 가치**가 달라짐
+
+#### MAU를 3개로 나누어 분석하기
+- MAU만으로는, 어떤 사용자가 서비스를 사용하는지 제대로 파악 불가능
+- 서비스 사용자의 구성을 더 자세하게 파악하려면
+  - `MAU`를 **3개의 속성**으로 나누어 분석
+- 3개의 속성
+  - **신규 사용자** : 이번 달에 등록한 신규 사용자
+  - **리피트 사용자** : 이전 달에도 사용한 사용자
+  - **컴백 사용자** : 이번달의 신규 사용자가 아니며, 리피트 사용자도 아닌, 한동안 사용하지 않았다 돌아온 사용자
+- 10만의 MAU가 있다는 정보를 기반으로 대책을 세운다면,
+  - 대책이 애매할 수 밖에 없음
+- 신규 사용자 2만, 리피트 사용자 7만, 컴백 1만명으로 분류 후,
+  - 신규 사용자를 대상으로 어떠한 대책을 시행할지 등을 검토하는 것이 효율적
+- 신규 사용자 수, 리피트 사용자 수, 컴백 사용자 수를 집계하는 쿼리
+  - `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  monthly_user_action AS (
+    -- 월별 사용자 액션 집약하기
+    SELECT DISTINCT
+      u.user_id
+      -- PostgreSQL
+      , substring(u.register_date, 1, 7) AS register_month
+      , substring(l.stamp, 1, 7) AS action_month
+      , substring(CAST(
+        l.stamp::date - interval '1 month' AS text
+      ), 1, 7) AS action_month_priv
+
+      -- Redshift
+      , substring(u.regsiter_date, 1, 7) AS register_month
+      , substring(l.stamp, 1, 7) As action_month
+      , substring(
+        CAST(dateadd(month, -1, l.stamp::date) AS text), 1, 7
+      ) AS action_month_priv
+
+      -- BigQuery
+      , substr(u.register_date, 1, 7) AS register_month
+      , substr(l.stamp, 1, 7) AS action_month
+      , substr(CAST(
+        date_sub(date(timestamp(l.stamp)), interval 1 month) AS string
+      ), 1, 7) AS action_month_priv
+
+      -- Hive, SparkSQL
+      , substring(u.register_date, 1, 7) AS register_month
+      , substring(l.stamp, 1, 7) AS action_month
+      , substring(
+        CAST(add_month(to_date(l.stamp), -1) AS string), 1, 7
+      ) AS action_month_priv
+    
+    FROM
+      mst_users AS u
+      JOIN
+        action_log AS l
+        ON u.user_id = l.user_id
+  )
+  , monthly_user_with_type AS (
+    -- 월별 사용자 분류 테이블
+    SELECT
+      action_month
+      , user_id
+      , CASE
+          -- 등록 월과 액션월이 일치하면 신규 사용자
+          WHEN register_month = action_month THEN 'new_user'
+          -- 이전 월에 액션이 있다면, 리피트 사용자
+          WHEN action_month_priv = 
+            LAG(action_month)
+
+            OVER(PARTITION BY user_id ORDER BY action_month)
+            -- SparkSQL의 경우 다음과 같이 사용
+            OVER(PARTITION BY user_id ORDER BY action_month ROWS BETWEEN 1 PRECEDING AND 1 PRECEDING)
+            THEN 'repeat_user'
+          -- 이외의 경우에는 컴백 사용자
+          ELSE 'come_back_user'
+        END AS c
+      , action_month_priv
+    FROM
+      monthly_user_action
+  )
+  SELECT
+    action_month
+
+    -- 특정 달의 MAU
+    , COUNT(user_id) AS mau
+    -- new_users / repeat_users / com_back_users
+    , COUNT(CASE WHEN c = 'new_user' THEN 1 END) AS new_users
+    , COUNT(CASE WHEN c = 'repeat_user' THEN 1 END) AS repeat_users
+    , COUNT(CASE WHEN c = 'come_back_user' THEN 1 END) AS come_back_users
+  FROM
+    monthly_user_with_type
+  GROUP BY
+    action_month
+  ORDER BY
+    action_month
+  ;
+  ```
