@@ -1322,3 +1322,84 @@
   ORDER BY
     action_month;
   ```
+
+#### MAU 속성별 반복률 계산하기
+- MAU를 몇 가지 속성으로 분류하고
+  - 사용자 수를 계산해서, 원형 그래프로 그리는 방법
+- **구성비**만으로는
+  - `이전 달의 신규 등록 사용자 중에 어느 정도가 리피트 사용자로 전환되었는가`
+  - `이전 달에 시행한 컴백 사용자를 늘리기 위한 캠페인의 효과가 얼마나 되는가`
+    - 등을 파악하기 어려움
+- 각 출력 결과를 바탕으로 다음과 같은 표 생성
+  - 이 표를 통해, 위 질문에 대한 답이 가능
+  - 반복률 계산시, 사용한 값(분자/분모 값)은 따로 출력하지 않음
+- 표
+
+ |**2016년 3월**|**2016년 4월**|**2016년 5월**|**2016년 6월**|**2016년 7월**|**2016년 8월**
+-----|-----|-----|-----|-----|-----|-----
+MAU| 21,931 | 35,555 | 117,819 | 320,684 | 429,247 | 293,566 
+신규 MAU| 21,931 | 27,755 | 106,249 | 277,121 | 314,249 | 138,463 
+신규 반복 MAU| | 7,800 | 7,267 | 34,593 | 87,932 | 78,403 
+신규 반복률| |35.60%|26.20%|32.60%|31.70%|24.90%
+반복 MAU| | 7,800 | 10,634 | 40,586 | 109,213 | 127,257 
+기존 반복 MAU| | | 3,367 | 5,590 | 20,176 | 49,385 
+기존 반복률| | |43.20%|52.60%|49.70%|43.40%
+컴백 MAU| | | 936 | 2,977 | 5,785 | 27,846 
+컴백 반복 MAU| | | | 403 | 1,105 | 1,469 
+컴백 반복률| | | |43.10%|37.10%|25.40%
+- MAU 내역과 MAU 속성들의 반복률을 계산하는 쿼리
+  - `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  monthly_user_action AS (
+    ...
+  )
+  , monthly_user_with_type AS (
+    ...
+  )
+  , monthly_users AS (
+    ...
+  )
+  SELECT
+    action_month
+    , mau
+    , new_users
+    , repeat_users
+    , come_back_users
+    , new_repeat_users
+    , continuous_repeat_users
+    , come_back_repeat_users
+
+    -- PostgreSQL, Redshift, BigQuery
+    -- Hive의 경우 NULLIF를 CASE로 변경
+    -- SparkSQL, LAG 함수의 프레임에 ROWS BETWEEN 1 PRECEDING AND 1 PRECEDING 지정
+    -- 이번 달에 신규 사용자이면서, 해당 월에 신규 리피트 사용자인 사용자의 비율
+    , 100.0 * new_repeat_users
+      / NULLIF(LAG(new_users) OVER(ORDER BY action_month), 0)
+      AS priv_new_repeat_ratio
+    
+    -- 이전 달에 리피트 사용자이면서, 해당 월에 기존 리피트 사용자인 사용자의 비율
+    , 100.0 * continuous_repeat_users
+      / NULLIF(LAG(repeat_users) OVER(ORDER BY action_month), 0)
+      AS priv_continuous_repeat_ratio
+    
+    -- 이전 달에 컴백 사용자이면서, 해당 월에 컴백 리피트 사용자인 사용자의 비율
+    , 100.0 * come_back_repeat_users
+      / NULLIF(LAG(come_back_users) OVER(ORDER BY action_month), 0)
+      AS priv_come_back_repeat_ratio
+    
+  FROM
+    monthly_users
+  ORDER BY
+    action_month
+  ;
+  ```
+
+#### 원 포인트
+- 이번 절의 리포트는 **월 단위**로 집계하므로,
+  - 1일에 등록한 사용자가, 30일 이상 사용하지 않으면 **리피트 사용자가 되지 않음**
+  - 월의 마지막 날에 등록한 사용자는 2일만 사용해도 **리피트 사용자**로 구분됨
+- 판정 기간에 약간 문제가 있긴 하지만
+  - 간단하게 추이를 확인하거나, 서비스끼리 비교할 때는 굉장히 유용한 리포트
+- 판정 기간의 차이가 신경쓰인다면,
+  - 독자적인 정의를 추가로 만들고 집계해야 함
