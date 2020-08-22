@@ -1265,3 +1265,60 @@
     action_month
   ;
   ```
+
+#### 리피트 사용자를 3가지로 분류하기
+- 리피트 사용자
+  - 이전 달에서도 사용한 사용자
+  - 3가지 분류
+    - 신규 리피트 사용자 : 이전 달에는 **신규 사용자**, 이번달에도 사용
+    - 기존 리피트 사용자 : 이전 달도 **리피트 사용자**, 이번달에도 사용
+    - 컴백 리피트 사용자 : 이전 달에 **컴백 사용자**, 이번달에도 사용
+- 효과
+  - 같은 리피트 사용자라도,
+    - 등록한지 얼마 안 되어 서비스 이용 경험이 적은 사용자인지
+    - 지속적으로 사용하는 사용자인지
+      - 등으로 상세히 파악 가능
+- 리피트 사용자를 세분화해서 집계하는 쿼리
+  - `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  monthly_user_action AS (
+    ...
+  )
+  , monthly_user_with_type AS (
+    ...
+  )
+  , monthly_users AS (
+    SELECT
+      m1.action_month
+      , COUNT(m1.user_id) AS mau
+      , COUNT(CASE WHEN m1.c = 'new_user'   THEN 1 END) AS new_users
+      , COUNT(CASE WHEN m1.c = 'repeat_user'  THEN 1 END) AS repeat_users
+      , COUNT(CASE WHEN m1.c = 'come_back_user' THEN 1 END) AS come_back_users
+      
+      , COUNT(
+        CASE WHEN m1.c = 'repeat_user' AND m0.c = 'new_user' THEN 1 END
+      ) AS new_repeat_users
+      , COUNT(
+        CASE WHEN m1.c = 'repeat_user' AND m0.c = 'repeat_user' THEN 1 END
+      ) AS continuous_repeat_users
+      , COUNT(
+        CASE WHEN m1.c = 'repeat_user' AND m0.c = 'come_back_user' THEN 1 END
+      ) AS come_back_repeat_uesrs
+    FROM
+      -- m1 : 해당 월의 사용자 분류 테이블
+      monthly_user_with_type AS m1
+      LEFT OUTER JOIN
+      -- m0 : 이전 달의 사용자 분류 테이블
+      ON m1.user_id = m0.user_id
+      AND m1.action_month_priv = m0.action_month
+    GROUP BY
+      m1.action_month
+  ) 
+  SELECT
+    *
+  FROM
+    monthly_users
+  ORDER BY
+    action_month;
+  ```
