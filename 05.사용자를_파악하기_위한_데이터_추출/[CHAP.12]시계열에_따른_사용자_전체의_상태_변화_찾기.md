@@ -42,7 +42,7 @@
       )
       ```
 
-### 등록 수의 추이와 경향 보기
+### 1. 등록 수의 추이와 경향 보기
 - 중요한 지표 : 등록 수
   - 사용자 등록이 필요한 서비스에서 활용
 - **등록 수**가 감소 경향일 경우  
@@ -138,7 +138,7 @@
 - 추가로 여러 장치를 사용하는 사용자가 있을 수 있다.
   - 이런 사용자의 존재를 파악해두면 도움이 됨
 
-### 지속률과 정착률 산출하기
+### 2. 지속률과 정착률 산출하기
 - 서비스를 지속하게 사용하는 사용자가 중요
 - 등록 시점을 기준으로 
   - 일정 기간동안 사용자가 **지속해서 사용**하고 있는지를 조사할 때
@@ -367,7 +367,7 @@
 - n일 지속률를 계산하기 위해 필요한 **판정 기간의 로그**가 존재하지 않는 경우
   - 지표는 `NULL`로 출력 됨
 
-### 정착률 관련 리포트
+#### 정착률 관련 리포트
 - 정착률에 대한 리포트, 리포트 작성하기 위한 SQL
 
 #### 매일의 n일 정착률 추이
@@ -549,7 +549,7 @@
   - `14일`의 정착률 기간 동안 70% 사용자는 1~2일 정도에 그친다 등을 알고 싶다면
   - `5-4`에서 확인했던 SQL을 다시 볼 것
 
-### 지속과 정착에 영향을 주는 액션 집계하기
+### 3. 지속과 정착에 영향을 주는 액션 집계하기
 - 지속률과 정착률의 추이를 계산하여 사용자의 상황을 이해하는 것도 중요하지만
   - **무엇 때문에** 그러한 추이가 발생하는지 모르면 대책 세우기가 어려움
 - 지표와 리포트를 만들때 **OO율을 올리자** 처럼 새로운 목표와 과제가 있어야 하며
@@ -728,7 +728,7 @@
     - ex) 동영상 업로드 보다는 이미지 업로드 촉진 등
 - 액션 여부뿐 아니라, **액션 수**에 따라서도 차이가 있을 수 있음
 
-### 액션 수에 따른 정착률 집계하기
+### 4. 액션 수에 따른 정착률 집계하기
 - `CROSS JOIN`, `CASE`, `AVG`
 - SNS 사례
   - 페이스북과 트위터 등 대표적인 SNS 사례 중
@@ -913,7 +913,7 @@
 - 액션별로 사용자를 집계하면
   - **사용자가 어떤 기능을 더 많이 사용하도록 유도해야 하는지 파악 가능**
 
-### 사용 일수에 따른 정착률 집계하기
+### 5. 사용 일수에 따른 정착률 집계하기
 - `COUNT`, `SUM` 윈도 함수, `AVG`함수
 - 정착률
 - **7일 정착 기간**동안
@@ -1037,7 +1037,7 @@
   - 사용 일수대신 
     - SNS 서비스에 올린 **글의 개수** 또는 **소셜 게임의 레벨**등으로 대상을 변경하여 사용할 수 있음
 
-### 사용자의 잔존율 집계하기
+### 6. 사용자의 잔존율 집계하기
 - `CROSS JOIN`, `SUM(CASE ~)`, `AVG(CASE ~)`
 - 잔존율
 - 서비스 등록 수개월 후에, 어느 정도 비율의 사용자가
@@ -1159,7 +1159,7 @@
   - 해당 **월**에 실시한 대책 또는 캠페인 등의 **이벤트를 함께 기록**하면,
   - 수치 변화의 원인 등도 쉽게 파악이 가능
 
-### 방문 빈도를 기반으로 사용자 속성을 정의하고 집계하기
+### 7. 방문 빈도를 기반으로 사용자 속성을 정의하고 집계하기
 - `CASE`식, `NULLIF`, `LAG`
 - `MAU`, 리피트, 컴백
 - 서비스 사용자의 방문 빈도를 **월 단위**로 파악하고,
@@ -1403,3 +1403,185 @@ MAU| 21,931 | 35,555 | 117,819 | 320,684 | 429,247 | 293,566
   - 간단하게 추이를 확인하거나, 서비스끼리 비교할 때는 굉장히 유용한 리포트
 - 판정 기간의 차이가 신경쓰인다면,
   - 독자적인 정의를 추가로 만들고 집계해야 함
+
+### 8. 방문 종류를 기반으로 성장지수 집계하기
+- Growth Hacking Team
+  - 서비스를 운영할 때 **사용자 등록**을 포함해
+  - 사용자의 **지속 사용**, **리텐션** 등을 높일 수 있는 대책과 서비스 성장을 가속하기 위한 팀
+- 성장 지수
+  - 서비스의 성장을 **지표화**하거나,
+  - 그로스 해킹 팀의 성과를 지표화하는 한 방법
+
+#### 성장지수
+- 사용자의 서비스 사용과 관련한 **상태 변화**를 수치화해서
+  - 서비스가 성장하는지 알려주는 지표
+- 성장 지수가 `1`이상이라면, 서비스가 성장한다는 의미
+  - `0`보다 낮다면, 서비스가 퇴보 중
+- 서비스 사용과 관련한 상태 변화 패턴
+  - `Signup` : 신규 등록하고 사용을 시작
+  - `Deactivation` : 액티브 유저 -> 비액티브 유저
+  - `Reactivation` : 비액티브 유저 -> 액티브 유저
+  - `Exit` : 서비스를 탈퇴하거나 사용 중지
+- 사용자의 서비스 등록부터 탈퇴까지
+  - **사용 상태**를 기반으로 성장지수를 산출하려면,
+  - 상태 변화 판정이 필요함
+- 성장 지수 산출
+  - `Signup + Reactivation - Deactivation - Exit`
+- `서비스를 사용하게 된 사용자`와 `떠난 사용자`를 집계하고
+  - 어떤 사용자가 많은지 수치화 해서 나타냄
+- 서비스를 `계속 사용하는 사용자`와 `계속 사용하지 않는 사용자`는
+  - 성장지수에 영향을 주지 않음
+- 성장 지수를 개선하는 두가지 방법
+  - `Signup`과 `Reactivation`을 높이는 방법
+  - `Deactivation`을 낮추는 방법
+
+#### 성장지수 집계하기
+- 성장 지수 집계를 위해서, **사용자의 상태**를 확인해야 함
+- 아래의 상태로 **날짜별 판정**
+  - 신규 등록(`is_new`)
+  - 탈퇴(`is_exit`)
+  - 특정 날짜에 서비스 접근(`is_access`)
+  - 전라 서비스 접근(`was_access`)
+- 성장지수 산출을 위해 사용자 상태를 집계하는 쿼리
+  - `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  unique_action_log AS (
+    -- 같은 날짜 로그를 중복하여 세지 않도록 중복 배제
+    SELECT DISTINCT
+      user_id
+      , substring(stamp, 1, 10) AS action_date
+      -- BigQuery
+      , substr(stamp, 1, 10) AS action_date
+    FROM
+      action_log
+  )
+  , mst_calendar AS (
+    -- 집계하고 싶은 기간을 캘린더 테이블로 생성
+    -- generate_series 등으로 동적 생성도 가능
+              SELECT '2016-10-01' AS dt
+    UNION ALL SELECT '2016-10-02' AS dt
+    UNION ALL SELECT '2016-10-03' AS dt
+    -- 생략
+    UNION ALL SELECT '2016-11-04' AS dt
+  )
+  , target_date_with_user AS (
+    -- 사용자 마스터에 캘린더 테이블의 날짜를 target_date로 추가
+    SELECT
+      c.dt AS target_date
+      , u.user_id
+      , u.register_date
+      , u.withdraw_date
+    FROM
+      mst_users AS u
+      CROSS JOIN
+        mst_calendar AS c
+  )
+  , user_status_log AS (
+    SELECT
+      u.target_date
+      , u.user_id
+      , u.regsiter_date
+      , u.withdraw_date
+      , a.action_date
+      , CASE WHEN u.register_date = a.action_date THEN 1 ELSE 0 END AS is_new
+      , CASE WHEN u.withdraw_date = a.action_date THEN 1 ELSE 0 END AS is_exit
+      , CASE WHEN u.target_date = a.action_date THEN 1 ELSE 0 END AS is_access
+      , LAG(CASE WHEN u.target_date = a.action_date TEHN 1 ELSE 0 END)
+        OVER(
+          PARTITION BY u.user_id
+          ORDER BY u.target_date
+          -- SparkSQL, 다음과 같이 프레임 지정
+          ROWS BETWEEN 1 PRECEDING AND 1 PRECEDING
+        ) AS was_access
+    FROM
+      target_date_With_user AS u
+      LEFT JOIN
+        unique_action_log AS a
+        ON u.user_id = a.user_id
+        AND u.target_date = a.action_date
+    WHERE
+      -- 집계 기간을 등록일 이후로만 필터링
+      u.register_date <= u.target_date
+      -- 탈퇴 날짜가 포함되어 있으면, 집계 기간을 탈퇴 날짜 이전만으로 필ㅇ터링
+      AND (
+        u.withdraw_date IS NULL
+        OR u.target_date <= u.withdraw_date
+      )
+  )
+  SELECT
+    target_date
+    , user_id
+    , is_new
+    , is_exit
+    , is_access
+    , was_access
+  FROM
+    user_status_log
+  ;
+  ```
+- 날짜별 사용자 상태를 판정했다면,
+  - **성장 지수를 계산하는 패턴**을 계산하고, 최종적으로 성장 지수 계산
+- `signup`, `reactivation`, `deactivation`, `exit`, `growth_index` 날짜별 계산
+- 매일의 성장지수를 계산하는 쿼리
+  - `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  unique_action_log AS (
+    ...
+  )
+  , mst_calendar AS (
+    ...
+  )
+  , target_date_with_user AS (
+    ...
+  )
+  , user_status_log AS (
+    ...
+  )
+  , user_growth_index AS (
+    SELECT
+      *
+      , CASE
+        -- 어떤 날짜에 신규 등록 또는 탈퇴한 경우 signup | exit으로 판정
+        WHEN is_new + is_exit = 1 THEN
+          CASE
+            WHEN is_new = 1 THEN 'signup'
+            WHEN is_exit = 1 THEN 'exit'
+          END
+        -- 신규 등록과 탈퇴가 아닌 경우 reactivation 또는 deactivation으로 판정
+        -- 이때 reactivation, deactivation의 정의에 맞지 않는 경우는 NULL
+        WHEN is_new + is_exit = 0 THEN
+          CASE
+            WHEN was_access = 0 AND is_access = 1 THEN 'reactivation'
+            WHEN was_access = 1 AND is_access = 0 THEN 'deactivation'
+          END
+        --어떤 날짜에 신규 등록과 탈퇴를 함께 했다면(is_new + is_exit = 2) NULL로 지정
+        END AS growth_index
+    FROM
+      user_status_log
+  )
+  SELECT
+    target_date
+    , SUM(CASE growth_index WHEN 'signup'         THEN 1 ELSE 0 END) AS signup
+    , SUM(CASE growth_index WHEN 'reactivation'   THEN 1 ELSE 0 END) AS reactivation
+    , SUM(CASE growth_index WHEN 'deactivation'   THEN -1 ELSE 0 END) AS deactivation
+    , SUM(CASE growth_index WHEN 'exit'           THEN -1 ELSE 0 END) AS exit
+    -- 성장 지수 정의에 맞게 계산
+    , SUM(
+        CASE growth_index
+          WHEN 'signup'       THEN 1
+          WHEN 'reactivation' THEN 1
+          WHEN 'deactivation' THEN -1
+          WHEN 'exit'         THEN -1
+          ELSE 0
+        END
+      ) AS growth_index
+  FROM
+    user_growth_index
+  GROUP BY
+    target_date
+  ORDER BY
+    target_date
+  ;
+  ```
