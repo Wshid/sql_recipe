@@ -42,12 +42,12 @@ reservations(reservation_id, register_date, visit_date, days) As (
 )
 SELECT
   reservation_id
-  , register_Date
+  , register_date
   , visit_date
   -- PostgreSQL, Redshift, 날짜끼리 뺄셈 가능
   , visit_date::date - register_date::date AS lead_time
   -- BigQuery, date_diff
-  , date_diff(date(timestamp(visit_date)), date(timestamp(register_Date)), day) AS lead_time
+  , date_diff(date(timestamp(visit_date)), date(timestamp(register_date)), day) AS lead_time
   -- Hive, SparkSQL, datediff 함수 사용
   , datediff(to_date(visit_date), to_date(register_date)) AS lead_time
 FROM
@@ -163,3 +163,124 @@ FROM
 - `EC사이트`라면, 수도권보다 **지방**이
   - 이전 구매일로부터의 **리드 타임**이 짧거나
   - **연령별**로 구분이 되는 등 다양한 경향이 나타남
+
+## 2. 카트 추가 후에 구매했는지 파악하기
+- SQL : `CASE`, `SUM`, `AVG`
+- 분석 : 카트 탈락률
+
+### 카트 탈락
+- 카트에 얺은 상품을 구매하지 않고, 이탈한 상황
+  - 상품 구매까지 절차에 어떤 문제가 있는 경우
+  - 예상하지 못한 비용(배송비, 수수료 등)으로 당황
+  - 북마크 기능 대신 카트를 사용하는 사람들
+- 카트에 상품을 추가했다고 해서, **반드시 구매**로 이어지지 않음
+  - **시간에 따라 구매로 이어지는 비율**이 어느정도 인지, 리포트로 만들어 보는 것이 좋음
+- 이번 절에서는
+  - 카트에 추가된지 `48시간` 이내에 구매되지 않은 상품을 **카트 탈락**이라고 부르고
+  - 카트에 추가된 상품 수를 분모로 넣어 구한 비율을 **카트 탈락률**이라 정의
+
+### CODE.13.4. 상품들이 카트에 추가된 시각과 구매된 시각을 산출하는 쿼리
+- `PostgreSQL`, `Hive`, `BigQuery`, `SparkSQL`
+```sql
+WITH
+row_action_log AS (
+  SELECT
+    dt
+    , user_id
+    , action
+    -- 쉼표로 구분된 product_id 리스트 전개하기
+    -- PostgreSQL의 경우 regexp_split_to_table 함수 사용 가능
+    , regexp_split_to_table(products, ',') AS product_id
+    -- Hive, BigQuery, SparkSQL의 경우, FROM 구문으로 전개하고 product_id 추출
+    , product_id
+    , stamp
+  FROM
+    action_log
+    -- BigQuery
+    CROSS JOIN unnest(split(products, ',')) As product_id
+    -- Hive, SparkSQL
+    LATERAL VIEW explode(split(products, ',')) e AS product_id
+
+, action_time_stats AS (
+  -- 사용자와 상품 조합의 카트 추가 시간과 구매 시간 추출
+  SELECT
+    user_id
+    , product_id
+    , MIN(CASE action WHEN 'add_cart' THEN dt END) AS dt
+    , MIN(CASE action WHEN 'add_cart' THEN stamp END) AS add_cart_time
+    , MIN(CASE action WHEN 'purchase' THEN stamp END) AS purchase_time
+    -- PostgreSQL, timestamp 자료형으로 변환하여 간격을 구한 뒤, EXTRACT(epoc ~)로 초단위 변환
+    , EXTRACT(epoch from
+      MIN(CASE action WHEN 'purchase' THEN stamp::timestamp END)
+      - MIN(CASE action WHEN 'add_cart' THEN stamp::timestamp END))
+    -- BigQuery, unix_seconds 함수로 초 단위 UNIX 시간 추출 후 차이 구하기
+    , MIN(CASE action WHEN 'purchase' THEN unix_seconds(timestamp(stamp)) END)
+      - MIN(CASE action WHEN 'add_cart' THEN unix_seconds(timestamp(stamp)) END)
+    -- Hive, Spark, unix_timestamp 함수로 초 단위 UNIX 시간 추출 후 차이 구하기
+    , MIN(CASE action WHEN 'purchase' THEN unix_timestamp(stamp) END)
+      - MIN(CASE action WHEN 'add_cart' THEN unix_timestamp(stamp) END)
+    AS lead_time
+  FROM
+    row_action_log
+  GROUP BY
+    user_id, product_id
+)
+SELECT
+  user_id
+  , product_id
+  , add_cart_time
+  , purchase_time
+  , lead_time
+FROM
+  action_time_stats
+ORDER BY
+  user_id, product_id
+;
+```
+
+### CODE.13.5. 카트 추가 후 n시간 이내에 구매된 상품 수와 구매율을 집계하는 쿼리
+- `PostgreSQL`, `Hive`, `BigQuery`, `SparkSQL`
+```sql
+WITH
+row_action_log AS (
+  ...
+)
+, action_time_stats AS (
+  ...
+)
+, purchase_lead_time_flag AS (
+  SELECT
+    user_id
+    , product_id
+    , dt
+    , CASE WHEN lead_time <= 1 * 60 * 60 THEN 1 ELSE 0 END AS purchase_1_hour
+    , CASE WHEN lead_time <= 6 * 60 * 60 THEN 1 ELSE 0 END AS purchase_6_hours
+    , CASE WHEN lead_time <= 24 * 60 * 60 THEN 1 ELSE 0 END AS purchase_24_hours
+    , CASE WHEN lead_time <= 48 * 60 * 60 THEN 1 ELSE 0 END AS purchase_48_hours
+    , CASE
+        WHEN lead_time IS NULL OR NOT (lead_time <= 48 * 60 * 60) THEN 1
+        ELSE 0
+      END AS not_purchase
+  FROM action_time_stats
+)
+SELECT
+  dt
+  , COUNT(*) AS add_cart
+  , SUM(purchase_1_hour) AS purhcase_1_hour
+  , AVG(purchase_1_hour) AS purhcase_1_hour_rate
+  , SUM(purchase_6_hours) AS purchase_6_hours
+  , AVG(purchase_6_hours) AS purhcase_6_hours_rate
+  , SUM(purchase_24_hours) AS purchase_24_hours
+  , AVG(purchase_24_hours) AS purchase_24_hours_rate
+  , SUM(purchase_48_hours) AS purchase_48_hours
+  , AVG(purchase_48_hours) AS purchase_48_hours)rate
+FROM
+  purchase_lead_time_flag
+GROUP BY
+  dt
+;
+```
+
+### 원포인트
+- 카트 탈락 상품이 있는 사용자에게 **메일 매거진** 등의 **푸시**로
+  - 쿠폰 또는 할인 정보를 보내주어 구매를 유도하는 방법 등을 고려
