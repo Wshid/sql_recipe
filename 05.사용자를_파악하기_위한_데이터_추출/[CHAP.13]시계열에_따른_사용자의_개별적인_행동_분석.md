@@ -284,3 +284,180 @@ GROUP BY
 ### 원포인트
 - 카트 탈락 상품이 있는 사용자에게 **메일 매거진** 등의 **푸시**로
   - 쿠폰 또는 할인 정보를 보내주어 구매를 유도하는 방법 등을 고려
+
+## 3. 등록으로부터의 매출을 날짜별로 집계하기
+- SQL : `CROSS JOIN`, `CASE`, `AVG`
+- 분석 : `ARPU`, `ARPPU`, `LTV`
+- 서비스 운영 또는 사용자를 얻기 위해 **광고**와 **제휴**등의 비용을 치름
+- 사용자 등록으로부터 시간 경과에 따른 매출을 집계하여
+  - 광고와 제휴등에 비용이 **적절하게 투자**되었는지 판단
+- 사용자 등록을 **월별 집계**하고, `n`일 경과 시점의 `1인당 매출 금액`을 집계하는 방법
+
+**등록 월**|**등록자 수**|**1인당 30일 매출 금액**|**1인당 45일 매출 금액**|**1인당 60일 매출 금액**
+:-----:|:-----:|:-----:|:-----:|:-----:
+2016.01| 12,937 | 4,890 | 7,830 | 8,590 
+2016.02| 12,101 | 5,290 | 7,710 | 9,000 
+
+- **지속률** 또는 **정착률**을 산출하는 쿼리와 거의 유사
+  - 다만 `0`과 `1`의 액션 플래그가 아닌 **매출액**을 집계
+- 집계 대상이 되는 **지표 마스터**를 생성하고
+  - **사용자 마스터**의 **등록일**과 **구매로그**를 결합한 뒤, 집계에 필요한 데이터 산출
+
+### CODE.13.6. 사용자들의 등록일부터 경과한 일수별 매출 계산 쿼리
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+```sql
+WITH
+index_intervals(index_name, interval_begin_date, interval_end_date) AS (
+  -- PostgreSQL, VALUES
+  -- Hive, Redshift, BigQuery, SparkSQL, UNION ALL
+  VALUES
+    ('30 day sales amount', 0, 30)
+    , ('45 day sales amount', 0, 45)
+    , ('60 day sales amount', 0, 60)
+)
+, mst_users_with_base_date AS (
+  SELECT
+    user_id
+    -- 기준일로 등록일 사용
+    , register_date AS base_date
+
+    -- 처음 구매한 날을 기준으로 삼고 싶다면, 다음과 같이 사용
+    , first_purchase_date AS base_date
+  FROM
+    mst_users
+)
+, purchase_log_With_index_date AS (
+  SELECT
+    u.user_id
+    , u.base_date
+    -- 액션의 날짜와 로그 전체의 최신 날짜를 날짜 자료형으로 변환
+    , CASE(p.stamp AS date) AS action_date
+    , MAX(CAST(p.stamp AS date)) OVER() AS latest_date
+    , substring(p.stamp, 1, 7) AS month
+    -- BigQuery, 한 번 타임스탬프 자료형으로 변환하고 날짜 자료형으로 변환
+    , date(timestamp(p.stamp)) AS action_date
+    , MAX(date(timestamp(p.stamp))) OVER() AS latest_date
+    , substr(p.stamp, 1, 7) AS month
+
+    , i.index_name
+    -- 지표 대상 기간의 시작일과 종료일 계산
+    -- PostgreSQL
+    , CASE(u.base_date::date + '1 day'::interval * i.interval_begin_date AS date)
+      AS index_begin_date
+    , CASE(u.base_date::date + '1 day'::interval * i.interval_end_date AS date)
+      AS index_end_date
+    -- Redshift
+    , dateadd(day, r.interval_begin_date, u.base_date::date) AS index_begin_date
+    , dateadd(day, r.interval_end_date, u.base_date::date) AS index_end_date
+    -- BigQuery
+    , date_add(CAST(u.base_date AS date), interval r.interval_begin_date day)
+      AS index_begin_date
+    , date_add(CAST(u.base_date AS date), interval r.interval_end_date day)
+      AS index_end_date
+    -- Hive, SparkSQL
+    , date_add(CAST(u.base_date AS date), r.interval_begin_date)
+      AS index_begin_date
+    , date_add(CAST(u.base_date AS date), r.interval_end_date)
+      AS index_end_date
+    , p.amount
+  FROM
+    mst_users_with_base_date AS u
+    LEFT OUTER JOIN
+      action_log AS p
+      ON u.user_id = p.user_id
+      AND p.action = 'purchase'
+    CROSS JOIN
+      index_intervals AS i
+)
+SELECT *
+FROM
+  purchase_log_with_index_date
+;
+```
+
+### CODE.13.7. 월별 등록자수와 경과일수별 매출을 집계하는 쿼리
+- 대상 기간에 **로그 날짜**가 포함되어 있는지 아닌지로 구분
+- 월차 리포트를 작성할 것을 가정하여 **등록 월**과 **지표**로 집약하고
+- 등록 후의 **경과일수**로 매출 계산
+- `0`과 `1`의 액션 플래그가 아니라 **구매액**을 리턴
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+```sql
+WITH index_intervals(index_name, interval_begin_date, interval_end_date) AS (
+  ...
+)
+, mst_users_with_base_date AS (
+  ...
+)
+, purchase_log_with_index_date AS (
+  ...
+)
+, user_purchase_amount AS (
+  SELECT
+    user_id
+    , month
+    , index_name
+    -- 3. 지표 대상 기간에 구매한 금액을 사용자별로 합계
+    , SUM (
+      -- 1. 지표의 대상 기간의 종료일이 로그의 최신 날짜에 포함되었는지 확인
+      CASE WHEN index_end_date <= latest_date THEN
+        -- 2. 지표의 대상 기간에 구매한 경우에는, 구매 금액, 이외에는 0 지정
+        CASE
+          WHEN action_date BETWEEN index_begin_date AND index_end_date THEN amount ELSE 0
+        END
+      END
+    ) AS index_date_amount
+  FROM
+    purchase_log_with_index_date
+  GROUP BY
+    user_id, month, index_name, index_begin_date, index_end_date
+)
+SELECT
+  month
+  -- 등록자 수 세기
+  -- 다만 지표와 대상 기간의 종료일이 로그의 최신 날짜 이전에 포함되지 않게 조건 걸기
+  , COUNT(index_date_amount) AS users
+  , index_name
+  -- 지표의 대상 기간 동안 구매한 사용자 수
+  , COUNT(CASE WHEN index_date_amount > 0 THEN user_id END) AS purchase_uu
+  -- 지표와 대상 기간 동안의 합계 매출
+  , SUM(index_date_amount) AS total_amount
+  -- 등록자별 평균 매출
+  , AVG(index_date_amount) AS avg_amount
+FROM
+  user_purchase_amount
+GROUP BY
+  month, index_name
+ORDER BY
+  month, index_name
+;
+```
+- **광고**로 인한 사용자 유입 비용이 타당한지를 검토할 수 있도록
+  - **등록 수**를 **분모**에 넣어, **1인당 매출** 집계
+- 분모를 변경할 경우, **다른 지표**로도 활용 가능
+  - **서비스 사용자 수**를 분모에 넣으면 **1인당 평균 매출 금액**(ARPU: Average Revenue Per User)
+  - **과금 사용자 수**를 분모에 넣으면 **과금 사용자 1인당 평균 매출 금액**(ARPPU: Average Revenue Per Paid User)
+- **ARPU**와 **ARPPU**는 의미가 엄연히 다름
+  - 단순하게 사용자별 **과금 액수**를 나타내는 경우는 **ARPU**사용
+  - 프리미엄 모델(소셜 게임)에서 무과금 사용자와 과금 사용자를 **구별**할 필요가 있을 경우 **ARPPU** 사용
+
+### LTV(고객 생애 가치)
+- 이번에 산출한 `n일 경과 시점에서의 1인당 매출 금액`과 비슷한 지표
+- Life Time Value
+- 고객이 생애에 걸쳐 어느 정도로 **이익에 기여**하는가를 산출
+- **고객 획득 가치**(CPA, Cost Per Acquisition)을 설정 관리하는데 중요한 지표
+- 산출 방법
+  - `LTV = <연간 거래액> * <수익률> * <지속 연수(체류 기간)>`
+- 사용자별로 산출할 수도 있지만
+  - 실무에서는 **고객 전체를 기반**으로 구하는 경우가 많음
+- 추가로 **수익률**을 엄밀하게 산출하기는 어려움
+- 인터넷에서의 각종 서비스에 종사하는 사람들은
+  - LTV를 일반적으로 **광고 예산 설정**, **CPA**적합 여부 확인하는 곳에 사용
+- 인터넷 서비스는 **사이클이 빠르기 때문에**, 측정 단위를 **몇 달**또는 **반년**으로 하는 것이 좋음
+
+### 원포인트
+- 이번절의 `SQL`은 **사용자 등록일**을 기준으로
+  - 1인당 `n`일 매출 금액을 집계하는 것이지만,
+- 제휴의 성과 지점이 아닌, **최소 판매 시점**으로 설정해 등록하면
+  - 광고 담당자의 운용에 도움을 주는 지표를 찾을 수 있음
+- 이런 리포트를 만들고 싶다면 `WITH`구문에 있는
+  - `mst_users_with_base_date` 테이블의 `base_date` 컬럼을 **최초 판매 시점**으로 전환하면 됨
