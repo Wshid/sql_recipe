@@ -383,3 +383,141 @@ FROM
 GROUP BY via
 GROUP BY cvr DESC
 ```
+
+### 정리
+- 앞의 결과를 사용하면,
+  - 어떤 **유입 경로**에 더 신경을 써야하는지 판단할 수 있음
+- 추가로, 극단적으로 유입이 낮은 경로는, 원인을 찾아내어 해결하고
+  - 비용이 너무 많이 지출되는 경우라면, 경로 자체를 제거하는 등의 판단 필요
+
+## 4. 접근 요일, 시간대 파악하기
+- SQL : 날짜 함수, 문자열 함수
+- 분석 : 요일, 시간대
+- 사용자가 접근하는 **요일/시간대**는 서비스에 따라 특징이 있음
+  - 토요일에 많이 쓰는 서비스
+  - 휴일 전에 많이 쓰는 서비스
+  - 요일/시간대와 상관없이 틈틈이 많이 사용되는 서비스 등
+    - 다양한 패턴이 존재
+- 이 특성을 파악하면 다음과 같이 활용가능
+  - 공지사항
+  - 메일 매거진 발신 시점
+  - 캠페인 시작 시점 및 종료 시점
+- 요일/시간대별 페이지뷰를 나타내는 리포트를 만드는 방법
+  - 24시간에서 추출하고자 하는 **단위 결정**(10m, 15m, 30m)
+  - 접근한 시간을 해당 단위로 집계, 요일과 함께 **방문자 수** 집계
+
+### CODE.14.7. 요일/시간대별 방문자수를 집계하는 쿼리
+- 30분 간격으로 집계
+- 날짜 함수를 사용하여 **요일 번호**를 구하고,
+  - 이를 `CASE`식을 사용해 전개하는 방법 사용
+- 요일 번호 정의는, **미들웨어에 따라 다를 수 있음**
+- 요일번호 추출하는 SQL 구문과 출력 형식
+  >**미들웨어**|**SQL 구문**|**요일 번호 출력 형식**
+  >-----|-----|-----
+  >PostgreSQL, Redshift|date\_part('dow', timestamp)|일요일(0) ~ 토요일(6)
+  >PostgreSQL|date\_part('isodow', timestamp)|월요일(1) ~ 일요일(7)
+  >BigQuery|EXTRACT(dayofweek from timestamp)|일요일(1) ~ 토요일(7)
+  >Hive, SparkSQL|from\_unixtime(untimestamp, 'u')|월요일(1) ~ 일요일(7)
+- 쿼리
+  - `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  access_log_with_dow AS (
+    SELECT
+      stamp
+      -- 일요일(0)부터 토요일(6)까지의 요_일 번호 추출하기
+      -- PostgreSQL, Redshift의 경우 date_part 함수 사용하기
+      , date_part('dow', stamp::timestamp) AS dow
+      -- BigQuery의 경우 EXTRACT(dayofweek from ~) 함수 사용하기
+      , EXTRACT(dayofweek from timestamp(stamp)) - 1 AS dow
+      -- Hive, Spark의 경우 from_unixtime 함수 사용하기
+      , from_unixtime(unix_timestamp(stamp), 'u') % 7 dow
+
+      -- 00:00:00부터의 경과 시간을 초 단위로 계산
+      -- PostgreSQL, Hive, Redshift, SparkSQL
+      --  substring 함수를 사용해 시, 분, 초를 추출하고 초 단위로 환산하여 더하기
+      -- BigQuery의 경우 substring을 substr, int를 int64로 수정하기
+      , CAST(substring(stamp, 12, 2) AS int) * 60 * 60
+        + CAST(substring(stamp, 15, 2) AS int) * 60
+        + CAST(substring(stamp, 18, 2) AS int)
+        AS whole_seconds
+      
+      -- 시간 간격 정하기
+      -- 현재 예제에서는 30분(1800초)으로 지정하기
+      , 30 * 60 AS interval_seconds
+    FROM access_log
+  )
+  , access_log_with_floor_seconds AS (
+    SELECT
+      stamp
+      , dow
+      -- 00:00:00부터의 경과 시간을 interval_seconds로 나누기
+      -- PostgreSQL, Hive, Redshift, SparkSQL의 경우는 다음과 같이 사용하기
+      -- BigQuery의 경우 int를 int64로 수정하기
+      , CAST((floor(while_seconds / interval_seconds) * interval_seconds) AS int)
+        AS floor_seconds
+    FROM access_log_with_dow
+  )
+  , access_log_with_index AS (
+    SELECT
+      stamp
+      , dow
+      -- 초를 다시 타임스탬프 형식으로 변환하기
+      -- PostgreSQL, Redshift의 경우는 다음과 같이 하기
+      , lpad(floor(floor_seconds / (60 * 60))::text, 2, '0') || ':'
+          || lpad(floor(floor_seconds % (60 * 60) / 60)::text, 2, '0') || ':'
+          || lpad(floor(floor_seconds % 60)::text, 2, '0')
+      -- BigQuery의 경우 다음과 같이 하기
+      , concat(
+          lpad(CAST(floor(floor_seconds / (60 * 60)) AS string), 2, '0'), ':'
+          , lapd(CAST(floor(floor_seconds, 60 * 60)) / 60 AS string), ':'
+          , lpad(CAST(floor(floor_seconds % 60)) AS string), 2, '0')
+      -- Hive, SparkSQL의 경우
+      , concat(
+          lpad(CAST(floor(floor_seconds / (60 * 60)) AS string), 2, '0'), ':'
+          , lpad(CAST(floor(floor_seconds % (60 * 60) / 60) AS string), 2, '0'), ':'
+          , lpad(CAST(floor(floor_seconds % 60) AS string), 2, '0')
+        )
+        AS index_name
+    FROM access_log_with_floor_seconds
+  )
+  SELECT
+    index_time
+    , COUNT(CAST dow WHEN 0 THEN 1 END) AS sun
+    , COUNT(CAST dow WHEN 1 THEN 1 END) AS mon
+    , COUNT(CAST dow WHEN 2 THEN 1 END) AS tue
+    , COUNT(CAST dow WHEN 3 THEN 1 END) AS wed
+    , COUNT(CAST dow WHEN 4 THEN 1 END) AS thu
+    , COUNT(CAST dow WHEN 5 THEN 1 END) AS fri
+    , COUNT(CAST dow WHEN 6 THEN 1 END) AS sat
+  FROM
+    access_log_with_index
+  GROUP BY
+    index_name
+  ORDER BY
+    index_name
+  ;
+  ```
+
+### 원포인트
+- 사용자의 방문이 많은 시간대에 캠페인을 실시하는 것이 안정적이며, 일반적임
+- 반대로 사용자가 **적은 시간대**를 사용하는 경우
+  - **EC 사이트**의 경우 타임 세일
+  - **소셜 게임**의 경우 아이템 획득률 상승 등의 이벤트 검토 가능
+
+### 참고 : 디바이스에 따라 사용자의 행동이 다를 수 있음을 의식하기
+- **PC 사이트**와 **스마트폰 사이트**는 사용자가
+  - 사용하는 방식이나, 사용장소가 서로 다를 수 있음
+  - 이는 곧 사용 목적이 **다를 수 있음**
+- PC 사이트는 주로 **가정** 또는 **직장**에서 사용하는 경우가 많음
+  - 사용자의 행동 패턴으로는 천천히 비교하여 검토하거나
+  - 스마트폰 입력이 귀찮아서 사용하는 경우를 생각할 수 있음
+- 스마트폰 사이트는 가정또는 직장이 아닌 **외부 장소** 또는 **이동 중**에 사용하는 경우가 더 많음
+  - 외부 장소에서는 그에 따른 **다양한 상황**을 고려해야 함
+  - 예를 들어 `지도`를 활용한다던지, `쿠폰`을 제공한다던지, `전화`를 바로 걸수 있게 한다던지 상황이 있음
+- 유명한 웹사이트의 **PC 사이트**와 **스마트폰 사이트** 구성을 비교해보면,
+  - 스마트폰에서는 이 같은 상황과 관련된 **액션 모듈**을 PC 사이트보다 더 잘 보이게 배치하는 경향이 있음
+- **PC 사이트**와 **스마트폰 사이트**는
+  - 사용자의 패턴, 요구하는 정보 등이 다르다는 것을 의식하고 서비스를 운영할 것
+- 또한 분석시에도, 사용상태 집계 시,
+  - **PC 사이트**와 **스마트폰 사이트**를 구분하여 집계하는 것이 좋음
