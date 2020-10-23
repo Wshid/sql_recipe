@@ -125,3 +125,113 @@ GROUP BY
 - **상세 페이지**부터 조회를 시작하는 사용자도 많음
 - 사용자가 어디로 **유입**되는지 **입구 페이지**를 파악하면
   - 사이트를 더 매력적으로 설계 가능
+
+## 2. 이탈률과 직귀율 계산하기
+- 개념
+  - SQL : `ROW_NUMBER`, `COUNT 윈도 함수`, `AVG(CASE ~ END)`
+  - 분석 : 이탈률, 직귀율
+- **출구 페이지**를 사용하여 **이탈률**을 계산하고,
+  - 문제가 되는 페이지를 찾아내는 방법
+- **직귀율**
+  - 특정 페이지만 조회하고, 곧바로 이탈한 비율을 나타내는 지표
+  - 직귀율이 높은 페이지
+    - 성과로 바로 **이어지지 않을 가능성**이 높음
+    - 확인하고 대책 필요
+  - 광고로 수익을 얻는 사이트의 경우
+    - 여러 페이지를 조회해야 수익이 많지만,
+    - **메인 페이지**에서 **직귀율**이 높다면,
+      - 사용자가 어떤 정보를 찾을 동기가 약하기 때문
+    - 사이트 배치등을 검토할 수 있음
+
+### 이탈률 집계하기
+- 이탈률 공식
+  - `이탈률 = 출구 수 / 페이지 뷰`
+- 단순히 **이탈률**이 높다고 해서, 나쁜 페이지는 아님
+  - 사용자가 만족해서 이탈하는 페이지(`구매 완료`, `기사 상세 화면`)는 당연히 이탈률이 높아야 함
+    - 문제가 되지 않음
+- 다만, 사용자가 만족하지 못해, 중간 과정에 이탈한다면
+  - 개선 검토 필요
+- 이탈률 리포트(경로, 출구 수, 페이지 뷰, 이탈률)
+  >**경로**|**출구 수 **|**페이지 수**|**이탈률**
+  >-----|-----|-----|-----
+  >/detail| 3,667 | 9,365 |39.10%
+  >/search\_list| 2,574 | 8,516 |30.20%
+
+#### CODE.15.4. 경로별 이탈률을 집계하는 쿼리
+- `PostgreSQL`, `Hive`, `RedShift`, `BigQuery`, `SparkSQL`
+```sql
+WITH
+activity_log_with_exit_flag AS (
+  SELECT
+    *
+    -- 출구 페이지 판정
+    , CASE
+        WHEN ROW_NUMBER() OVER(PARTITION BY session ORDER BY stamp DESC) = 1 THEN 1
+        ELSE 0
+      END AS is_exit
+    FROM
+      activity_log
+)
+SELECT
+  path
+  , SUM(is_exit) AS exit_count
+  , COUNT(1) AS page_view
+  , AVG(100.0 * is_exit) AS exit_ratio
+FROM
+  activity_log_with_exit_flag
+GROUP BY path
+;
+```
+
+### 직귀율 집계하기
+- 직귀 수(**한 페이지만을 조회한 방문 횟수**)를 구한 뒤, 다음과 같은 식을 사용해 계산
+  - `직귀율 = 직귀 수 / 입구 수`
+  - `직귀율 = 직귀 수 / 방문 횟수`
+- 순수하게 **랜딩 페이지**에서 다른 페이지로 이동하는지 평가할 때는,
+  - 전자의 지표가 더 바람직한 계산식
+- 특정 페이지를 조회하고, 곧바로 이탈하는 원인은
+  - 연관 기사 또는 상품으로 사용자를 **이동**시키는 모듈이 **기능하지 않는 점**
+  - 페이지 자체의 **콘텐츠**에 사용자가 만족하지 못하는 경우
+  - 이동이 **복잡**해서 다음 단계로 이동하지 못하는 경우
+- 직귀율 리포트(경로, 직귀 수, 입구 수, 직귀율)
+  >**경로**|**직귀 수**|**입구 수**|**직귀율**
+  >-----|-----|-----|-----
+  >/detail| 1,652 | 3,539 |46.60%
+  >/search\_list| 585 | 2,330 |25.10%
+
+#### CODE.15.5. 경로들의 직귀율을 집계하는 쿼리
+- `PostgreSQL`, `Hive`, `RedShift`, `BigQuery`, `SparkSQL`
+```sql
+WITH
+activity_log_with_landing_bounce_flag AS (
+  SELECT
+    *
+    -- 입구 페이지 판정
+    , CASE
+        WHEN ROW_NUMBER() OVER(PARTITION BY session ORDER BY stamp ASC) = 1 THEN 1
+        ELSE 0
+      END AS is_landing
+    -- 직귀 판정
+    , CASE
+        WHEN COUNT(1) OVER(PARTITION BY session) = 1 THEN 1
+        ELSE 0
+      END AS is_bounce
+  FROM
+    activity_log
+)
+SELECT
+  path
+  , SUM(is_bounce) AS bounce_count
+  , SUM(is_landing) AS landing_count
+  , AVG(100.0 * CASE WHEN is_landing = 1 THEN is_bounce END) AS bounce_ratio
+FROM
+  actibity_log_with_landing_bounce_flag
+GROUP BY path
+;
+```
+
+### 원포인트
+- **컴퓨터 전용 사이트**와 **스마트폰 전용 사이트**가 개별적으로 존재하는 경우
+  - 사용자가 원하는 **콘텐츠**나 **콘텐츠 배치**에 차이가 있을 수 있음
+- 이런 경우, 컴퓨터 전용 사이트와 스마트폰 전용 사이트를
+  - **따로따로 집계**할 것
