@@ -235,3 +235,128 @@ GROUP BY path
   - 사용자가 원하는 **콘텐츠**나 **콘텐츠 배치**에 차이가 있을 수 있음
 - 이런 경우, 컴퓨터 전용 사이트와 스마트폰 전용 사이트를
   - **따로따로 집계**할 것
+
+## 3. 성과로 이어지는 페이지 파악하기
+- 개념
+  - SQL : `SIGN` 함수, `SUM` window 함수
+  - 분석 : CVR
+- 방문 횟수를 아무리 늘려도, 성과와 관계 없는 페이지로만 사용자가 유도된다면,
+  - 성과가 발생하지 않음
+- **성과와 직결되는 페이지**로 유도해야
+  - 웹사이트 전체의 **CVR**을 향상시킬 수 있음
+- 여러 가지 검색 기능을 제공할 때,
+  - 성과에 이르는 비율이 **적은 검색 기능**이 있다면
+  - 위치를 옮기거나, 삭제하는 등의 방안 검토
+- 페이지를 비교 했을 때
+  - **조회 수**는 높지 않지만
+  - 성과에 이르는 비율이 높다면
+    - 해당 페이지의 **중요도**가 높음
+  - 페이지의 **구성 검토**시에 좋은 정보가 될 수 있음
+
+### 목표
+- 어떤 페이지로 방문하였을 때, 성과로 빠르게 연결될 수 있는지 파악할 수 있게 아래 내용 파악
+  - 페이지 또는 경로에 대한 **방문 횟수**
+  - 방문이 **성과로 연결**되는지 여부
+- 완료 화면(`/complete`)에 도달하는 것을 성과(`conversion`)이라 정의하고,
+  - 완료 화면에 도달할 때까지, 사용자가 방문한 **경로** 계산
+
+### 다양한 비교 패턴
+- 기능기반 비교
+  - 업종 검색
+  - 직종 검색
+  - 조건 검색
+- 캠페인 기반 비교 
+  - 축하금 캠페인
+  - 기프트카드 캠페인
+- 페이지 기반 비교
+  - 서비스 소개
+  - 비공개 구인
+- 콘텐츠 종류 기반 비교
+  - 상세 페이지(그림 있음)
+  - 상세 페이지(그림 없음)
+- 경로들의 방문 횟수와 성과
+
+>**경로**|**방문 횟수**|**성과수**|**CVR**
+>:-----:|:-----:|:-----:|:-----:
+>/detail|5894|52|0.88%
+>/search\_list|5045|31|0.61%
+
+### CODE.15.6. 컨버전 페이지보다 이전 접근에 플래그를 추가하는 쿼리
+- **윈도 함수**를 사용하여
+  - **세션**들을 **타임 스탬프 내림차순**으로 정렬
+- `/complete` 페이지에 접근할 때까지의 접근 로그에 **플래그**를 추가
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  , activity_log_with_conversion_flag AS (
+    SELECT
+      session
+      , stamp
+      , path
+      -- 성과를 발생시키는 컨버전 페이지의 이전 접근에 플래그 추가
+      , SIGN(SUM(CASE WHEN path = '/complete' THEN 1 ELSE 0 END)
+              OVER(PARTITION BY session ORDER BY stamp DESC
+                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW))
+        AS has_conversion
+    FROM
+      activity_log
+  )
+  SELECT *
+  FROM
+    activity_log_with_conversion_flag
+  ORDER BY
+    session, stamp
+  ;
+  ```
+- 예시 결과
+>**session**|**stamp**|**path**|**has\_conversion**
+>-----|-----|-----|-----
+>05e9cc2b|2016-12-29 21:49:50|/search\_list|1
+>05e9cc2b|2016-12-30 21:49:50|/detail|1
+>05e9cc2b|2016-12-31 21:49:50|/input|1
+>05e9cc2b|2017-01-01 21:49:50|/confirm|1
+>05e9cc2b|2017-01-02 21:49:50|/complete|1
+>05e9cc2b|2017-01-03 21:49:50|/|0
+>05e9cc2b|2017-01-04 21:49:50|/detail|0
+
+- `/complete`로의 접근을 포함한 세션 로그에서는
+  - `/complete`에 도달할 때까지의 접근로그의 `has_session_conversion` 컬럼에 `1`이라는 플래그가 붙음
+- `/complete` 이후의 접근에서는 페이지 가치의 계산에 **포함되지 않으므로**
+  - 플래그가 `0`이 됨
+- `SIGN` 함수
+  ```js
+  expr < 0 ; return -1
+  expr = 0 ; return 0
+  expr > 0 ; return 1
+  ```
+
+### CODE.15.7. 경로들의 방문 횟수와 구성 수를 집계하는 쿼리
+- **방문 횟수**와 **구성 수**를 집계하여 `CVR`을 계산
+- 비율 계산에는
+  - **분모**가 `distcint`이기 때문에 
+  - 단순한 conversion flag의 `avg`가 아니라 `SUM/COUNT`로 계산
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  activity_log_with_conversion_flag AS (
+    -- CODE.15.6.
+  )
+  SELECT
+    path
+    -- 방문 횟수
+    , COUNT(DISTINCT session) AS sessions
+    -- 성과 수
+    , SUM(has_conversion) AS conversions
+    -- 성과 수 / 방문 횟수
+    , 1.0 * SUM(has_conversion) / COUNT(DISTINCT session) AS cvr
+  FROM
+    activity_log_with_conversion_flag
+  -- 경로별로 집약
+  GROUP BY path
+  ;
+  ```
+
+### 원포인트
+- 상품 구매, 자료 청구, 회원 등록을 **성과**라고 하면,
+  - 성과 직전에 있는 페이지는 **CVR**이 **상당히 높게** 측정 됨
+- 같은 계층의 컨텐츠, 유사 컨텐츠를 비교해볼 것
