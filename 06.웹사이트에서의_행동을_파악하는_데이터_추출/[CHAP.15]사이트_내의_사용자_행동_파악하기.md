@@ -360,3 +360,222 @@ GROUP BY path
 - 상품 구매, 자료 청구, 회원 등록을 **성과**라고 하면,
   - 성과 직전에 있는 페이지는 **CVR**이 **상당히 높게** 측정 됨
 - 같은 계층의 컨텐츠, 유사 컨텐츠를 비교해볼 것
+
+## 4. 페이지 가치 산출하기
+- 개념
+  - SQL : `ROW_NUMBER` 함수
+  - 분석 : 페이지 평가
+- 성과로 이어지는 페이지로 사용자를 유도하는 것이
+  - 웹사이트 매출 향상에 도움이 될 수 있음
+- **사이트 맵**을 변경해서
+  - 해당 페이지를 **경유**하게 만들거나
+  - 해당 페이지의 **콘텐츠**와 **광고**를 다른페이지에 활용하는 것이 좋음
+- **페이지 가치**라는 지표를 사용하여, 자세하게 페이지 분석하기
+
+### 페이지 가치 집계 준비
+- 페이지의 가치를 계산하려면 **성과 수치화**필요
+- 어떻게 성과를 수치화 할 수 있을지 파악
+
+#### 성과를 수치화 하기
+- 해당 사이트에서의 성과가 **구매**라면
+  - **구매 금액**을 기반으로 성과 수치화가 가능
+- 성과는
+  - `자료 청구`, `견적 의뢰 신청`등으로 설정할 수도 있고,
+  - 이런 페이지를 하는 페이지로 **이동하는 버튼**을 클릭하는 것으로 설정 가능
+- 이러한 설정을 기반을 기반으로
+  - `자료 청구`, `견적 의뢰`등을 할 때마다 `1`이라는 점수를 부여하거나
+  - 자료를 청구했을 때의 `매출`등을 점수로 부여하는 방법이 있음
+- 매출 금액 등의 `구체적인 정보`를 산출할 수 없는 경우
+  - 임시로 **ICV**라는 가치를 `1,000`으로 설정하기
+  - 페이지의 가치를 **상대적**으로 비교 가능
+
+#### 페이지의 가치를 할당하는 방법
+- **페이지 가치**로 어떤 판단을 내리고 싶은지에 따라
+  - 페이지 가치 **할당 로직**이 달라짐
+- 5가지
+  - **마지막 페이지에 할당하기**
+    - 직접적인 효과가 있다고 판단할 수 있는 **페이지**에 **성과**를 모두 할당
+    - **매출**에 직접적으로 기여하는 페이지 판단 가능
+  - **첫 페이지에 할당하기**
+    - 성과로 이어지는 **계기**가 되었던 첫 페이지에 성과를 모두 할당
+    - 이를 활용하면 **매출**에 간접적으로 기여하는 페이지 판단 가능
+    - `광고`또는 `검색 엔진`등의 **외부 유입**에서, 어떤 페이지가 가치가 높은지 판단 가능
+  - **균등하게 분산하기**
+    - 성과에 이르기까지 거쳤던 **모든 페이지**에 성과를 균등하게 할당
+    - 어떤 페이지를 **경유**했을 때, 사용자가 성과에 이르는지 판단 가능
+    - `적은 페이지를 거쳐 성과로 연결된 경우`와 `반복적으로 방문하는 페이지`의 경우
+      - 페이지의 가치가 **높게** 측정됨 
+  - **성과 지점에서 가까운 페이지에 더 높게 할당하기**
+    - **마지막 페이지**에 가까울수록 높은 가치 할당
+  - **성과 지점에서 먼 페이지에 더 높게 할당하기**
+    - **첫 페이지**에 가까울수록 높은 가치 할당
+
+### 특정한 계급 수로 히스토그램 만들기
+- 페이지의 가치를 구하려면 아래 두 내용을 결정해야 함
+  - 무엇을 **성과 수치**로 사용할 것인가
+  - 무엇을 **평가**할 것인가
+- 예시
+  - `신청 입력 양식을 제출하고 완료 화면이 출력된 경우`를 성과
+  - 이때의 성과 수치를 `1,000`으로 하여, **경유한 페이지**에 균등 할당
+  - 단, 페이지를 평가 할 때 `입력 ~ 확인 ~ 완료` 페이지를 포함하면, 집계가 제대로 이루어지지 않으므로
+    - 이는 집계 대상에서 제외
+    - 위 세 페이지는 `신청할 때 무조건 거치는 페이지`이기 때문에, 집계할 필요가 없음
+
+#### CODE.15.8. 페이지 가치 할당을 계산하는 쿼리
+- 페이지 가치 계산 대상 조건은
+  - **CODE.15.6**의 `has_conversion = 1`인 `입력/확인/완료`이외의 접근 로그
+  - `WHERE`절에 명시
+  - `SELECT`구문 내부에서 한 conversion에 `1,000`이라는 가치 할당 이후,
+  - 하나의 로그별 가치를 **윈도 함수**로 집계
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  activity_log_with_session_conversion_flag AS (
+    -- CODE.15.6.
+  )
+  , activity_log_with_conversion_assign AS (
+    SELECT
+      session
+      , stamp
+      , path
+      -- 성과에 이르기까지 접근 로그를 오름차순 정렬
+      , ROW_NUMBER() OVER(PARTITION BY session ORDER BY stamp ASC) AS asc_order
+      -- 성과에 이르기까지 접근 로그를 내림차순으로 순번
+      , ROW_NUMBER() OVER(PARTITION BY session ORDER BY stamp DESC) AS desc_order
+      -- 성과에 이르기까지 접근 수 세기
+      , COUNT(1) OVER(PARTITION BY session) AS page_count
+
+      -- 1. 성과에 이르기까지 접근 로그에 균등한 가치 부여
+      , 1000.0 / COUNT(1) OVER(PARTITION BY session) AS fair_assign
+
+      -- 2. 성과에 이르기까지 접근 로그의 첫 페이지 가치 부여
+      , CASE
+          WITH ROW_NUMBER() OVER(PARTITION BY session ORDER BY stamp ASC) = 1
+            THEN 1000.0
+          ELSE 0.0
+        END AS first_assign
+      
+      -- 3. 성과에 이르기까지 접근 로그의 마지막 페이지 가치 부여
+      , CASE
+          WHEN ROW_NUMBER() OVER(PARTITION BY session ORDER BY stamp DESC) = 1
+            THEN 1000.0
+          ELSE 0.0
+        END AS last_assign
+      
+      -- 4. 성과에 이르기까지 접근 로그의 성과 지점에서 가까운 페이지 높은 가치 부여
+      , 1000.0
+          * ROW_NUMBER() OVER(PARTITION BY session ORDER BY stamp ASC)
+          -- 순번 합계로 나누기( N*(N+1)/2 )
+          / ( COUNT(1) OVER(PARTITION BY session)
+              * (COUNT(1) OVER(PARTITION BY session) + 1) / 2)
+        AS decrease_assign
+
+      -- 5. 성과에 이르기까지의 접근 로그의 성과 지점에서 먼 페이지에 높은 가치 부여
+      , 1000.0
+          * ROW_NUMBER() OVER(PARTITION BY session ORDER BY stamp DESC)
+          -- 순번 합계로 나누기( N*(N+1)/2 )
+          / ( COUNT(1) OVER(PARTITION BY session) 
+              * (COUNT(1) OVER(PARTITION BY session) + 1) / 2)
+        AS increase_assign
+    FROM activity_log_with_conversion_flag
+    WHERE
+      -- conversion으로 이어지는 세션 로그만 추출
+      has_conversion = 1
+      -- 입력, 확인, 완료 페이지 제외하기
+      AND path NOT IN ('/input', '/confirm', '/complete')
+  )
+  SELECT
+    session
+    , asc_order
+    , path
+    , fair_assign AS fair_a
+    , first_assign AS first_a
+    , last_assign AS last_a
+    , decrease_assign AS dec_a
+    , increase_assign AS inc_a
+  FROM
+    activity_log_with_conversion_assign
+  ORDER BY
+    session, asc_order;
+  ```
+- 출력 결과 확인시,
+  - 한 `conversion`에 `1,000`의 가치가 부여됨
+- `fair_assign`, 세션의 수로 나눈 **평균값**, 처음 접근에만 가치 할당
+- `last_assign`, 마지막 접근에만 가치 할당
+
+#### CODE.15.9. 경로별 페이지 가치 합계를 구하는 쿼리
+- 페이지 가치의 합계를 **경로별**로 집계
+- 현재 상태에서는 **페이지 뷰**가 많은 페이지에서, 페이지의 가치가 높게 판정
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  activity_log_with_session_conversion_flag AS (
+    -- CODE.15.6.
+  )
+  , activity_log_With_conversion_assign AS (
+    -- CODE.15.8.
+  )
+  , page_total_values AS (
+    -- 페이지 가치 합계 계산
+    SELECT
+      path
+      , SUM(fair_assign) AS fair_assign
+      , SUM(first_assign) AS first_assign
+      , SUM(last_assign) AS last_assign
+    FROM
+      activity_log_with_conversion_assign
+    GROUP BY
+      path
+  )
+  SELECT * FROM page_total_values;
+  ```
+
+### CODE.15.10. 경로들의 평균 페이지 가치를 구하는 쿼리
+- 페이지 가치의 합계를 구했다면,
+  - **페이지 뷰**가 적으면서도, **높은 페이지 가치**를 가진 페이지를 찾기
+  - `페이지 가치 / (페이지 방문 횟수 OR 페이지 뷰)`
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  activity_log_with_session_conversion_flag AS (
+    -- CODE.15.6.
+  )
+  , activity_log_with_conversion_assign AS (
+    -- CODE.15.8
+  ), page_total_values AS (
+    -- CODE.15.9
+  )
+  , page_total_cnt AS (
+    -- 페이지 뷰 계산
+    SELECT
+      path
+      , COUNT(1) AS access_cnt -- 페이지 뷰
+      -- 방문 횟수로 나누고 싶은 경우, 다음과 같은 코드 작성
+      , COUNT(DISTINCT session) AS access_cnt
+    FROM
+      activity_log
+    GROUP BY
+      path
+  )
+  SELECT
+    -- 한 번의 방문에 따른 페이지 가치 계산
+    s.path
+    , s.access_cnt
+    , v.sum_fair / s.access_cnt AS avg_fair
+    , v.sum_first / s.access_cnt AS avg_first
+    , v.sum_last / s.access_cnt AS avg_last
+    , v.sum_dec / s.access_cnt AS avg_dec
+    , v.sum_inc / s.access_cnt AS avg_inc
+  FROM
+    page_total_cnt AS s
+  JOIN
+    page_total_values As v
+    ON s.path = v.path
+  ORDER BY
+    s.access_cnt DESC;
+  ```
+
+### 정리
+- 대부분의 접근 분석 도구는 **페이지의 평가 산출 로직이 한정**되는 경우가 많음
+- 무엇을 **평가**하고 싶은지를 명확하게 생각하고, 자유롭게 계산할 수 있게 되면,
+- 접근 분석 도구의 제한 없이, 새로운 가치 분석이 가능
