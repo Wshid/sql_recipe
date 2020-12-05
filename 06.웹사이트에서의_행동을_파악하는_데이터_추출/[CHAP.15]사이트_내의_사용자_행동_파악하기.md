@@ -579,3 +579,149 @@ GROUP BY path
 - 대부분의 접근 분석 도구는 **페이지의 평가 산출 로직이 한정**되는 경우가 많음
 - 무엇을 **평가**하고 싶은지를 명확하게 생각하고, 자유롭게 계산할 수 있게 되면,
 - 접근 분석 도구의 제한 없이, 새로운 가치 분석이 가능
+
+## 5. 검색 조건들의 사용자 행동 가시화 하기
+- 개념
+  - SQL : `SIGN` 함수, `SUM(CASE~END)`, `AVG(CASE~END)`, `LAG` 함수
+  - 분석 : CTR, CVR
+- 상품 또는 정보 검색 사이트에서는 **다양한 검색 방법 제공**
+  - EC의 경우 `카테고리`, `제조사`, `가격대`등의 필터 기능 제공
+  - 구인/구직 사이트의 경우 `지역`, `직종`등의 필터 기능
+- **검색 조건**을 더 자세하게 지정하여 사용하는 사용자의 동기가 명확함
+  - **성과**로 이어지는 경우가 많음
+- 검색 조건이 미흡하다면,
+  - **검색 조건 지정**을 유도하여, 성과를 높일 수 있음
+- CTR & CVR
+  - CTR : **검색 조건**을 활용하여 **상세 페이지**로 이동한 비율
+  - CVR : 상세 페이지 조회 후에 **성과**로 이어지는 비율
+- CTR을 x축, CVR을 y축으로 두었을 때,
+  - value는 방문 횟수,
+  - CTR, CVR이 높고, 검색 조건(왼쪽 위)쪽으로 사용자를 이동시키면 **성과**가 늘어날 수 있음
+- 차트를 그리기 위해 필요한 표
+  - 검색 타입 : 검색 결과 페이지의 `URL 매개변수`를 분석하여 분류
+  - CTR : 검색 화면에서 상세화면 이동 수 집계(단, 1회 이동, 3회 이동 모두 `1`로 치환)
+  >**검색 타입**|**방문횟수**|**CTR**|**상세 화면 이동 세션 수**|**CVR**|**성과 세션 수**
+  >-----|-----|-----|-----|-----|-----
+  >지역|1,683|51.40%|866|1.20%|11
+  >큰 에리어|1,199|50.90%|611|1.10%|7
+  >큰 에리어 + 직종 지정|603|56.00%|338|0.20%|1
+
+### CODE.15.11. 클릭 플래그와 컨버전 플래그를 계산하는 쿼리
+- 클릭 플래그 : 상세 페이지로의 이동을 의미
+- 컨버전 플래그 : 최종적으로 컨버전에 도달했는지를 판별
+- 윈도 함수로 집계
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  activity_log_with_session_click_conversion_flag AS (
+    SELECT
+      session
+      , stamp
+      , path
+      , search_type
+      -- 상세 페이지 이전 접근에 플래그 추가
+      , SIGN(SUM(CASE WHEN path = '/detail' THEN 1 ELSE 0 END)
+                  OVER(PARTITION BY session ORDER BY stamp DESC
+                    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW))
+        AS has_session_click
+      -- 성과를 발생시키는 페이지의 이전 접근에 플래그 추가
+      , SIGN(SUM(CASE WHEN path='/complete' THEN 1 ELSE 0 END)
+                  OVER(PARTITION BY session ORDER BY stamp DESC
+                    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW))
+        AS has_session_conversion
+    FROM activity_log
+  )
+  SELECT
+    session
+    , stamp
+    , path
+    , search_type
+    , has_session_click AS click
+    , has_session_conversion AS cnv
+  FROM
+    activity_log_with_session_click_conversion_flag
+  ORDER BY
+    session, stamp
+  ;
+  ```
+
+### CODE.15.2. 검색 타입별 CTR, CVR을 집계하는 쿼리
+- **클릭 플래그**와 **컨버전 플래그** 계싼 이후
+  - **검색 로그**로 압축하여, `접근 수`, `클릭 수`, `전환 수`, `CTR`, `CVR` 계산
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  activity_log_with_session_click_conversion_flag AS (
+    -- CODE.15.11
+  )
+  SELECT
+    search_type
+    , COUNT(1) AS count
+    , SUM(has_session_click) AS detail
+    , AVG(has_session_click) AS ctr
+    , SUM(CASE WHEN has_session_click = 1 THEN has_session_conversion END) AS conversion
+    , AVG(CASE WHEN has_session_click = 1 THEN has_session_conversion END) AS cvr
+  FROM
+    activity_log_with_session_click_conversion_flag
+  WHERE
+    -- 검색 로그만 추출
+    path = '/search_list'
+  -- 검색 조건으로 집약
+  GROUP BY
+    search_type
+  ORDER BY
+    count DESC
+  ;
+  ```
+- 1회의 방문에서 **여러개의 검색 타입**으로 검색한 경우 **각각 모두 카운트**
+- 전체적인 느낌을 파악할 때는 괜찮으나,
+  - 성과 직전의 검색 결과만을 원할 때는, `WITH`구문을 아래와 같이 수정해서 사용해야 함
+
+### CODE.15.13. 클릭 플래그를 직전 페이지에 한정하는 쿼리
+- `LAG` 함수를 사용해 상세 페이지로 접근하기 직전의 접근에 **플래그**를 붙ㅌ임
+- `LAG` 함수의 `OVER`구문에서 `ORDER BY stamp DESC`와 타임스탬프를 **내림차순**으로 하는 것은
+  - `has_session_conversion` 컬럼의 `OVER`구문과 정렬 조건으로 효율적인 정렬 처리를 하기 위함
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  activity_log_with_session_click_conversion_flag AS (
+    SELECT
+      session
+      , stamp
+      , path
+      , search_type
+      -- 상세 페이지의 직전 접근에 플래그 추가
+      , CASE
+          WHEN LAG(path) OVER(PARTITION BY session ORDER BY stamp DESC) = '/detail'
+            THEN 1
+          ELSE 0
+        END AS has_session_click
+      -- 성과가 발생하는 페이지의 이전 접근에 플래그 추가
+      , SIGN(
+        SUM(CASE WHEN path ='/complete' THEN 1 ELSE 0 END)
+          OVER(PARTITION BY session ORDER BY stamp DESC
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+        ) AS has_session_conversion
+    FROM
+      activity_log
+  )
+  SELECT
+    session
+    , stamp
+    , path
+    , search_type
+    , has_session_click AS click
+    , has_session_conversion AS cnv
+  FROM
+    activity_log_with_session_click_conversion_flag
+  ORDER BY
+    session, stamp
+  ;
+  ```
+
+### 원포인트
+- 조건을 상세하게 지정하더라도
+  - 걸리는 항목이 **적거나 없으면**
+  - 사용자가 **이탈**할 확률이 높음
+- 각각의 **검색 조건**과 **히트되는 항목 수**의 균형을 고려해서
+  - 카테고리를 어떻게 묶을지 **검토** 및 **개선** 필요
