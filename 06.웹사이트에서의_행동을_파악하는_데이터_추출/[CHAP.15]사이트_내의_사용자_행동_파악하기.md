@@ -725,3 +725,188 @@ GROUP BY path
   - 사용자가 **이탈**할 확률이 높음
 - 각각의 **검색 조건**과 **히트되는 항목 수**의 균형을 고려해서
   - 카테고리를 어떻게 묶을지 **검토** 및 **개선** 필요
+
+## 6. 폴아웃 리포트를 사용해 사용자 회유를 가시화하기
+- 최상위 페이지에서의 **검색 조건 입력**
+- 검색 결과 목록에서 **상세 화면**으로의 이동
+- **입력 양식 입력**부터 **확인/완료**까지 이어지는 **사용자 회유 흐름** 중
+  - 어디에서 이탈이 많은지, 얼마나 이동이 이루어지는지를 확인하고, 개선할 수 있다면
+    - 전체적인 **CVR**을 향상 시킬 수 있음 
+- 이전 절까지는
+  - 해당 페이지를 조회한 사용자가 **최종적으로 성과에 도달**할때까지 확인하는법 확인
+- 이번 절에서는
+  - **중간 지점의 도달률**도 함께 집계하는 방법
+- **Fall Trough** : 어떤 지점에서, 다른 지점으로 옮겨가는 것
+- **Fall Out** : 어떤 지점에서의 **이탈**
+- **폴 아웃 리포트** : 여러 지점에서의 이동률을 집계한 리포트
+  >**단계**|**방문 횟수**|**선두로부터의 이동률**|**직전까지의 이동률**
+  >-----|-----|-----|-----
+  >/| 30,841 |100.00%|100.00%
+  >/list| 15,603 |50.60%|50.60%
+  >/detail| 12,042 |39.00%|77.20%
+  >/input| 565 |1.80%|4.70%
+  >/complete| 188 |0.60%|33.30%
+  - URL에 기재된 지점간의 이동은
+    - 접속자가 다른 페이지를 경유 했거나, 직후에 이동했는지는 상관 없이
+    - **다음 지점에 도달한 방문 횟수**를 기록
+    - 표의 URL 순서대로 이동을 했다는 의미가 아님
+  - 직전/직후의 이동에 관련한 부분은 **15.7** 확인
+
+### CODE.15.14. 폴아웃 단계 순서를 접근 로그와 결합하는 쿼리
+- 단계(step) 순서를 번호로 명시한 마스터 테이블(`mst_fallout_step`)을 작성 후 **로그 데이터**와 결합
+- 추가로 세션들을 **스텝 순서(& URL)**로 집계하여,
+  - 폴아웃 리포트에서 필요한 로그를 선별하는 컬럼 계산
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  mst_fallout_step AS (
+    -- 폴아웃 단계와 경로의 마스터 테이블
+              SELECT 1 AS step, '/' AS path
+    UNION ALL SELECT 2 AS step, '/search_list' AS path
+    UNION ALL SELECT 3 AS step, '/detail' AS path
+    UNION ALL SELECT 4 AS step, '/input' AS path
+    UNION ALL SELECT 5 AS step, '/complete' AS path
+  )
+  , activity_log_with_fallout_step AS (
+    SELECT
+      l.session
+      , m.step
+      , m.path
+      -- 첫 접근과 마지막 접근 시간 구하기
+      , MAX(l.stamp) AS max_stamp
+      , MIN(l.stamp) AS min_stamp
+    FROM
+      mst_fallout_step AS m
+      JOIN
+        activity_log As l
+        ON m.path = l.path
+    GROUP BY
+      -- 세션별로 단계 순서와 경로를 사용해 집약
+      l.session, m.step, m.path
+  )
+  , activity_log_with_mod_fallout_step AS (
+    SELECT
+      session
+      , step
+      , path
+      , max_stamp
+      -- 직전 단계에서의 첫 접근 시간 구하기
+      , LAG(min_stamp)
+          OVER(PARTITION BY session ORDER BY step)
+          -- sparkSQL의 경우 LAG 함수에 프레임 지정 필요
+          OVER(PARTITION BY session ORDER BY step
+            ROWS BETWEEN 1 PRECEDING AND 1 PRECEDING)
+        AS lag_min_stamp
+      -- 세션에서의 단계 순서 최소값 구하기
+      , MIN(step) OVER(PARTITION BY session) AS min_step
+      -- 해당 단계 도달할때까지 걸린 단계 수 누계
+      , COUNT(1)
+        OVER(PARTITION BY session ORDER BY step
+          ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+        AS cum_count
+    FROM
+      activity_log_with_fallout_step
+  )
+  SELECT
+    *
+  FROM
+    activity_log_with_mod_fallout_step
+  ORDER BY
+    session, step
+  ;
+  ```
+
+### CODE.15.5. 폴아웃 리포트에 필요한 로그를 압축하는 쿼리
+- 쿼리 해석
+  1) session에 `step=1` URL이 있는 경우
+     - `step=1` URL(`/`)에 접근하지 않은 경우, **폴아웃 리포트** 대상에서 제외
+  2) 현재 step이 해당 `step`에 도달할때까지 누계 `step`수와 같은지 확인
+     - `step=2` URL(`/search_list`)를 스킵하고, `step=3` URL(`/detail`)에 직접 접근한 로그 등을 제외
+  3) 바로 전의 `step`에 처음 접근한 시각이 현재 `step`의 최종 접근 시각보다 이전인지 확인
+     - `step=3` 페이지에 접근한 이후, `step=2`로 돌아간 경우,
+       - `step=3`에 접근했던 로그를 제외
+     - 다만, `step=1`의 경우, 앞 페이지가 따로 존재하지 않기 때문에, 예외적으로 다루어야 함
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  mst_fallout_step AS (
+    -- CODE.15.14
+  )
+  , activity_log_with_fallout_step AS (
+    -- CODE.15.14
+  )
+  , activity_log_with_mod_fallout_step AS (
+    -- CODE.15.14
+  )
+  , fallout_log AS (
+    -- 폴아웃 리포트에 사용할 로그만 추출
+    SELECT
+      session
+      , step
+      , path
+    FROM
+      activity_log_with_mod_fallout_step
+    WHERE
+      -- 세션에서 단계 순서가 1인지 확인하기
+      min_step = 1
+      -- 현재 단계 순서가 해당 단계의 도달할 떄까지 누계 단계 수와 같은지 확인
+      AND step = cum_count
+      -- 직전 단계의 첫 접근 시간이 NULL 또는 현재 시간의 최종 접근 시간보다 이전인지 확인
+      AND (lag_min_stamp IS NULL OR max_stamp >= lag_min_stamp)
+  )
+  SELECT
+    *
+  FROM
+    fallout_log
+  ORDER BY
+    session, step
+  ;
+  ```
+
+### CODE.15.6. 폴아웃 리포트를 출력하는 쿼리
+- **스텝 순서**와 **url**로 집약하고
+  - **접근수**와 **페이지 이동률**을 집계
+- 스텝들의 접근 수와 페이지 이동률을 집계하는 쿼리
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  mst_fallout_step AS (
+    -- CODE.15.4
+  )
+  , activity_log_with_fallout_step AS (
+    -- CODE.15.4
+  )
+  , fallout_log AS(
+    -- CODE.15.5
+  )
+  SELECT
+    step
+    , path
+    , COUNT(1) AS count
+    -- 단계 순서 = 1 URL부터의 이동률
+    , 100.0 * COUNT(1)
+      / FIRST_VALUE(COUNT(1))
+        OVER(ORDER BY step ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
+      AS first_trans_rate
+    -- 직전 단계까지의 이동률
+    , 100.0 * COUNT(1)
+      / LAG(COUNT(1)) OVER(ORDER BY step ASC)
+      -- sparkSQL의 경우 LAG함수에 프레임 지정 필요
+      / LAG(COUNT(1)) OVER(ORDER BY step ASC ROWS BETWEEN 1 PRECEDING AND 1 PRECEDING)
+      AS step_trans_rate
+  FROM
+    fallout_log
+  GROUP BY
+    step, path
+  ORDER BY
+    step
+  ;
+  ```
+- `FIRST_VALUE` 함수 사용시에 `OVER(ORDER BY...)` 구문을 사용해야 함
+  - https://clausvisby.com/ko/1690-how-to-use-first_value-038-last_value-function-in-sql-server.html
+
+### 정리
+- 폴아웃 리포트는
+  - 웹사이트가 사용자를 어떻게 **유도**하는지를 대략적으로 파악하고 싶을 때 사용
+- **성과**로 이어진 사용자와, 이어지지 않은 사용자를 **따로 구분**해보면
+  - 더 유용한 정보 집계 가능
