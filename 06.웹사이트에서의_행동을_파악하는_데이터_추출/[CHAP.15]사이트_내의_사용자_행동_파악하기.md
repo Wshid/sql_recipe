@@ -792,7 +792,7 @@ GROUP BY path
       , max_stamp
       -- 직전 단계에서의 첫 접근 시간 구하기
       , LAG(min_stamp)
-          OVER(PARTITION BY session ORDER BY step)
+          OVER(PARTITION BY session ORDER BY step)*-
           -- sparkSQL의 경우 LAG 함수에 프레임 지정 필요
           OVER(PARTITION BY session ORDER BY step
             ROWS BETWEEN 1 PRECEDING AND 1 PRECEDING)
@@ -910,3 +910,269 @@ GROUP BY path
   - 웹사이트가 사용자를 어떻게 **유도**하는지를 대략적으로 파악하고 싶을 때 사용
 - **성과**로 이어진 사용자와, 이어지지 않은 사용자를 **따로 구분**해보면
   - 더 유용한 정보 집계 가능
+
+## 7. 사이트 내부에서 사용자 흐름 파악하기
+- 개념
+  - SQL : `LAG` 함수, `LEAD` 함수, `SUM` 윈도 함수
+  - 분석 : 사용자 흐름
+- 웹 사이트에서 사용자를 어떻게 **유도**하는지 파악하면
+  - `사이트맵`, `메뉴`, `모듈 배치`등을 개선할 수 있음
+- 사용자가 쓰는 기능이, `서비스 제공자가 생각하는 것`과 다르다고 생각된다면,
+  - 서비스 사용자에 맞게 사이트 구성을 변경하거나,
+  - 제공자의 의도에 맞게 서비스를 사용하도록 **유도**하는 등의 검토 필요
+- **15.6**에서는
+  - 특정 페이지를 조회한 사용자인지,
+  - 특정 페이지로 이동한 사용자가 **어느정도 존재**하는지 확인하는 방법 확인
+- 이번절에서는, 더 **상세하게**활용할 수 있는 **사용자 흐름 분석 방법** 소개
+
+### 사용자 흐름 그래프
+- 무엇을 분석할지 결정하고, 시작 지점으로 삼을 페이지 결정 필요
+- 두가지 질문
+  - **최상위 페이지에서 어떤 식으로 유도하는가**
+    - 일단 `검색`을 사용하는가
+    - 서비스를 `소개하는 페이지`를 보는가
+  - **상세 화면 전후에서 어떤 행동을 하는가**
+    - 검색이 아니라 **추천**을 사용하는 경우가 있는가
+    - **검색 결과**에서 **상세 화면**으로 이동하는 **비율**이 얼마나 되는가
+    - 상세 화면 출력 후 **갖고 싶은 물건**에 추가하거나 **장바구니**에 담는 행동을 하는가
+    - 상세 화면 출력 후 **추천**으로 다른 상품의 상세 화면으로 이동하는가
+
+### 다음 페이지 집계 하기 
+- **시작 지점이 되는 페이지**를 설정하면
+  - 시작 지점에서부터 어떤 형태로 **유도**되는지 정리한 표를 집계하는 SQL 확인 가능
+  >**시작 지점**|**방문 횟수**|**다음 페이지1**|**방문 횟수1**|**비율1**|**다음 페이지2**|**방문 횟수2**|**비율2**
+  >:-----:|:-----:|:-----:|:-----:|:-----:|:-----:|:-----:|:-----:
+  >/detail| 16,930 |/detail| 5,683 |33.60%|/| 1,793 |31.60%
+  > | | | | |/list| 2,426 |42.70%
+  > | | | | |NULL| 1,464 |25.80%
+  > | |/list| 3,048 |18.00%|/map| 1,532 |50.30%
+  > | | | | |/| 493 |16.20%
+  > | | | | |NULL| 1,023 |33.60%
+  > | |…| … |…|…| … |…
+  > | |NULL| 5,301 |31.30%|NULL| 5,301 |31.30%
+- `/detail` 페이지로 진입 했을 때, 어느 페이지로 가는 표로 정리
+  - 전환할 때의 비율은 **이전 페이지 방문 횟수**를 **분모**로 넣어 계산
+    - 이 때, 다음 페이지가 `NULL`이라면,
+      - 다음 페이지를 보지 않고 이탈한 경우를 의미
+
+#### CODE.15.7. `/detail` 페이지 이후의 사용자 흐름을 집계하는 쿼리
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+```sql
+WITH
+activity_log_with_lead_path AS (
+  SELECT
+    session
+    , stamp
+    , path AS path0
+    -- 곧바로 접근한 경로 추출하기
+    , LEAD(path, 1) OVER(PARTITION BY session ORDER BY stamp ASC) AS path1
+    -- 이어서 접근한 경로 추출하기
+    , LEAD(path, 2) OVER(PARTITION BY session ORDER BY stamp ASC) AS path2
+  FROM
+    activity_log
+)
+, raw_user_flow AS (
+  SELECT
+    path0
+    -- 시작 지점 경로로의 접근 수
+    , SUM(COUNT(1)) OVER() AS count0
+    -- 곧바로 접근한 경로 (존재하지 않는 경우 문자열 NULL)
+    , COALESCE(path1, 'NULL') AS path1
+    -- 곧바로 접근한 경로로의 접근 수
+    , SUM(COUNT(1)) OVER(PARTITION BY path0, path1) AS count1
+    -- 이어서 접근한 경로(존재하지 않는 경우 문자열로 `NULL` 지정)
+    , COALESCE(path2, 'NULL') AS path2
+    -- 이어서 접근한 경로로의 접근 수
+    , COUNT(1) AS count2
+  FROM
+    activity_log_with_lead_path
+  WHERE
+    -- 상세 페이지를 시작 지점으로 두기
+    path0 = '/detail'
+  GROUP BY
+    path0, path1, path2
+)
+SELECT
+  path0
+  , count0
+  , path1
+  , count1
+  , 100.0 * count1 / count0 AS rate1
+  , path2
+  , count2
+  , 100.0 * count2 / count1 AS rate2
+FROM
+  raw_user_flow
+ORDER BY
+  count1 DESC, count2 DESC
+;
+```
+- 위 쿼리의 결과에서 **중복된 데이터**가 많이 나와, 흐름파악이 어려움
+- 리포트 도구 등의 **사용자 흐름** 기능을 이요하면 쉽게 해결 가능
+  - 단, SQL로 처리해보기
+
+#### CODE.15.18. 바로 위의 레코드와 같은 값을 가졌을 때 출력하지 않게 데이터 가공
+- `LAG`함수를 사용해서, 바로 위에 있는 레코드 **경로 이름**을 추출한 뒤,
+  - 값이 **다를 경우**에만 출력하게 변경
+- `LAG` 함수 값이 `NULL`이 될 가능성이 있기 때문에
+  - `COALESCE` 함수를 사용해서, 적당한 디폴트 값 설정 
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  activity_log_with_lead_path AS (
+    -- CODE.15.17
+  )
+  , raw_user_flow AS (
+    -- CODE.15.17
+  )
+  SELECT
+    CASE
+      WHEN
+        COALESCE(
+          -- 바로 위의 레코드가 가진 path0 추출(존재 하지 않는 경우 NOT FOUND)
+          LAG(path0)
+            OVER(ORDER BY count1 DESC, count2 DESC)
+            , 'NOT FOUND'
+        ) <> path0
+      THEN path0
+    END AS path0
+    , CASE
+        WHEN
+          COALESCE(
+            LAG(path0)
+            OVER(ORDER BY count1 DESC, count2 DESC)
+            , 'NOT FOUND'
+          ) AS path0
+        THEN count0
+      END AS count0
+    , CASE
+        WHEN
+          COALESCE(
+            -- 바로 위의 레코드가 가진 여러 값을 추출할 수 있게, 문자열 결합 후 추출
+            -- PostgreSQL, Redshift의 경우 || 연산자 사용
+            -- Hive, BigQuery, SparkSQL의 경우 concat 함수 사용
+            LAG(path0 || path1)
+              OVER(ORDER BY count1 DESC, count2 DESC)
+            , 'NOT FOUND'
+          ) <> (path0 || path1)
+        THEN path1
+      END AS page1
+    , CASE
+        WHEN
+          COALESCE(
+            LAG(path0 || path1)
+              OVER(ORDER BY count1 DESC, count2 DESC)
+            , 'NOT FOUND'
+          ) <> (path0 || path1)
+        THEN count1
+      END AS count1
+    , CASE
+        WHEN
+          COALESCE(
+            LAG(path0 || path1)
+              OVER(ORDER BY count1 DESC, count2 DESC)
+            , 'NOT FOUND') <> (path0 || path1)
+        THEN 100.0 * count1 / count0
+      END AS rate1
+    , CASE
+        WHEN
+          COALESCE(
+            LAG(path0 || path1 || path2)
+              OVER(ORDER BY count1 DESC, count2 DESC)
+            , 'NOT FOUND') <> (path0 || path1 || path2)
+        THEN path2
+      END AS page2
+    , CASE
+        WHEN
+          COALESCE(
+            LAG(path0 || path1 || path2)
+              OVER(ORDER BY count1 DESC, count2 DESC)
+            , 'NOT FOUND') <> (path0 || path1 || path2)
+        THEN count2
+      END AS count2
+    , CASE
+        WHEN
+          COALESCE(
+            LAG(path0 || path1 || path2)
+              OVER(ORDER BY count1 DESC, count2 DESC)
+            , 'NOT FOUND') <> (path0 || path1 || path2)
+        THEN 100.0 * count2 / count1
+      END AS rate2
+    FROM
+      raw_user_flow
+    ORDER BY
+      count1 DESC
+      , count2 DESC
+  ;
+  ```
+
+### 이전 페이지 집계하기
+- `/detail` 페이지를 시작 기점으로, 이전 흐름 두 단계를 집계하기
+- 값이 `NULL`인 것은, 이전 페이지를 조회한 로그가 없다는 뜻 => 곧바로 방문
+  >**이전페이지2**|**방문횟수2**|**이동률2**|**이전페이지1**|**방문 횟수1**|**이동률1**|**시작 지점**|**방문 횟수**
+  >:-----:|:-----:|:-----:|:-----:|:-----:|:-----:|:-----:|:-----:
+  >/| 3,781 |61.10%|/list| 6,191 |36.60%|/detail| 16,930 
+  >/detail| 1,983 |32.00%| | | | | 
+  >NULL| 428 |6.90%| | | | | 
+  >/list| 302 |15.20%|/| 1,981 |11.70%| | 
+  >/detail| 692 |34.90%| | | | | 
+  >NULL| 987 |49.80%| | | | | 
+  >…| … | |…| … | | | 
+  >NULL| 6,049 |35.70%|NULL| 6,049 |35.70%| | 
+
+#### CODE.15.19 /detail 페이지 이전의 사용자 흐름을 집계하는 쿼리
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  activity_log_with_lag_path AS (
+    SELECT
+      session
+      , stamp
+      , path AS path0
+      -- 바로 전에 접근한 경로 추출하기(존재하지 않는 경우 문자열 'NULL'로 지정)
+      , COALESCE(LAG(path, 1) OVER(PARTITION BY session ORDER BY stamp ASC), 'NULL') AS path1
+      -- 그 전에 접근한 페이지 추출하기(존재하지 않는 경우 문자열 'NULL'로 지정)
+      , COALESCE(LAG(path, 2) OVER(PARTITION BY session ORDER BY stamp ASC), 'NULL') AS path2
+    FROM
+      activity_log
+  )
+  , raw_user_flow AS (
+    SELECT
+      path0
+      -- 시작 지점 경로로의 접근 수
+      , SUM(COUNT(1)) OVER() AS count0
+      , path1
+      -- 바로 전의 경로로의 접근 수
+      , SUM(COUNT(1)) OVER(PARTITION BY path0, path1) AS count1
+      , path2
+      -- 그 전에 접근한 경로로의 접근 수
+      , COUNT(1) AS count2
+    FROM
+      activity_log_with_lag_path
+    WHERE
+      -- 상세 페이지를 시작 지점으로 두기
+      path0 = '/detail'
+    GROUP BY
+      path0, path1, path2
+  )
+  SELECT
+    path2
+    , count2
+    , 100.0 * count2 / count1 AS rate2
+    , path1
+    , count1
+    , 100.0 * count1 / count0 AS rate1
+    , path0
+    , count0
+  FROM
+    raw_user_flow
+  ORDER BY
+    count1 DESC
+    , count2 DESC
+  ;
+  ```
+
+### 원포인트
+- 이번 절에서 소개한 `SQL`과 함께 사용해서
+  - `컴퓨터 사용자`, `스마트폰 사용자`, `광고 유입자`에 따라 어떤 흐름이 발생하였는지 살펴보기
+    - 새로운 문제를 찾고 해결 가능
