@@ -70,3 +70,123 @@
 - **오류율**이 높다면, **오류 통지 방법**에 문제가 있어
   - 사용자가 문제를 이해하지 못해 반복적으로 문제를 발생시키는 경우 일 수 있음
 - 이때는, **오류 통지 방법**을 변경할 것
+
+## 2. 입력~확인~완료까지의 이동률 집계하기
+- 개념
+  - SQL : `LAG`, `MIN`, `COUNT` 윈도 함수, `FIRST_VALUE` 함수
+  - 분석 : 확정률, 이탈률
+- **입력 양식**을 최적화 할때는
+  - 일단 `입력~확인~완료`까지의 **폴아웃 리포트**를 확인해야 함
+- 앞서 **16.1**처럼
+  - `URL`만으로는 **확인 화면**을 출력한 것인지, 오류를 출력한뒤 다시 입려고하면을 재출력한 것인지 **판별이 어려움**
+- 따라서 별도의 **상태 필드**를 포함시켜
+  - **오류 상태**를 함께 **로그**에 저장하는 것이 좋음
+
+### TABLE.16.1. 입력 양식을 활용한 폴아웃 리포트
+>**단계**|**방문횟수**|**입력 화면부터의 이동률**|**직전으로부터의 이동률**
+>:-----:|:-----:|:-----:|:-----:
+>Input| 7,292 |100.0%|100.0%
+>Confirm| 1,234 |16.9%|(*1)16.9%
+>Complete| 1,033 |(*2)14.2%|83.7%
+- **확정률** : `입력 시작 ~ 확인 화면`까지의 이동 비율
+- **CVR** : `완료 화면`까지 이동한 비율
+- **이탈률** : `100% - CVR`
+
+### CODE.16.2. 입력 양식의 폴아웃 리포트
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  mst_fallout_step AS (
+    -- /regist 입력 양식의 폴아웃 단계와 경로 마스터
+              SELECT 1 AS step, '/regist/input'     AS path
+    UNION ALL SELECT 2 AS step, '/regist/confirm'   AS path
+    UNION ALL SELECT 3 AS step, '/regist/complete'  AS path
+  )
+  , form_log_with_fallout_step AS (
+    SELECT
+      l.session
+      , m.step
+      , m.path
+      -- 특정 단계 경로의 처음/마지막 접근 시간 구하기
+      , MAX(l.stamp) AS max_stamp
+      , MIN(l.stamp) AS min_stamp
+    FROM
+      mst_fallout_step AS m
+      JOIN
+        form_log AS l
+        ON m.path = l.path
+    -- 확인 화면의 상태가 오류인 것만 추출하기
+    WHERE status = ''
+    -- 세션별로 단계 순서와 경로 집약하기
+    GROUP BY l.session, m.step, m.path
+  )
+  , form_log_with_mod_fallout_step AS (
+    SELECT
+      session
+      , step
+      , path
+      , max_stamp
+      -- 직전 단계 경로의 첫 접근 시간
+      , LAG(min_stamp)
+          OVER(PARTITION BY session ORDER BY step)
+          -- sparkSQL의 경우 LAG 함수에 프레임 지정 필요
+          OVER(PARTITION BY session ORDER BY step
+            ROWS BETWEEN 1 PRECEDING AND 1 PRECEDING)
+        AS lag_min_stamp
+      -- 세션 내부에서 단계 순서 최솟값
+      , MIN(step) OVER(PARTITION BY session) AS min_Step
+      -- 해당 단계에 도달할 때까지의 누계 단계 수
+      , COUNT(1)
+        OVER(PARTITION BY session ORDER BY step
+          ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT_ROW)
+        AS cum_count
+    FROM form_log_with_fallout_step
+  )
+  , fallout_log AS (
+    -- 폴아웃 리포트에 필요한 정보 추출하기
+    SELECT
+      session
+      , step
+      , path
+    FROM
+      form_log_with_mod_fallout_step
+    WHERE
+      -- 세션 내부에서 단계 순서가 1인 URL에 접근하는 경우
+      min_step = 1
+      -- 현재 단계 순서가 해당 단계에 도착할 때까지의 누계 단계 수와 같은 경우
+      AND step = cum_count
+      -- 직전 단계의 첫 접근 시간이 NULL 또는 현재 단계의 최종 접근 시간보다 앞인 경우
+      AND (lag_min_stemp IS NULL OR max_stamp >= lag_min_stamp)
+  )
+  SELECT
+    step
+    , path
+    , COUNT(1) AS count
+    -- '단계 순서 = 1'인 URL로부터의 이동률
+    , 100.0 * COUNT(1)
+      / FIRST_VALUE(COUNT(1))
+        OVER(ORDER BY step ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
+      AS first_trans_rate
+    -- 직전 단계로부터의 이동률
+    , 100.0 * COUNT(1)
+      / LAG(COUNT(1)) OVER(ORDER BY step ASC)
+      -- sparkSQL의 경우 LAG 함수에 프레임 지정 필요
+      / LAG(COUNT(1)) OVER(ORDER BY step ASC ROWS BETWEEN 1 PRECEDING AND 1 PRECEDING)
+      AS step_trans_rate
+  FROM
+    fallout_log
+  GROUP BY
+    step, path
+  ORDER BY
+    step
+  ;  
+  ```
+
+### 원포인트
+- 위 리포트는 **입력 화면**에서
+  - 사용자가 **입력의 의사** 유무는 판별할 수 없음
+    - `실수`로 버튼을 눌러 화면 이동이 된 경우도 있기 때문
+- **입력 의사**를 확인하고 싶다면,
+  - **최초 입력 항목**을 클릭할 때 또는 **최초 입력**시에 `javascript`를 사용해서 **추가 로그**를 전송해야 함
+- 위와 같이 할 경우,
+  - 확실하게 `입력 화면 출력 ~ 입력 시작 ~ 확인화면 출력 ~ 완료화면 출력`까지의 **폴아웃 리포트**를 작성할 수 있음
