@@ -190,3 +190,87 @@
   - **최초 입력 항목**을 클릭할 때 또는 **최초 입력**시에 `javascript`를 사용해서 **추가 로그**를 전송해야 함
 - 위와 같이 할 경우,
   - 확실하게 `입력 화면 출력 ~ 입력 시작 ~ 확인화면 출력 ~ 완료화면 출력`까지의 **폴아웃 리포트**를 작성할 수 있음
+
+## 3. 입력 양식 직귀율 집계하기
+- 개념
+  - SQL : `SUM(CASE ~)`, `SIGN`
+  - 분석 : 입력 양식 직귀율
+- 입력 양식 직귀율
+  - `입력 화면`으로 이동한 후
+  - `입력 시작`, `확인 화면`, `오류 화면`으로 이동한 로그가 없는 상태의 레코드를 센 것
+- 입력 양식 직귀 수가 높다면
+  - 사용자가 입력을 중간에 **포기**할만큼 `입력 항목`이 많다거나,
+  - **출력 레이아웃**이 난잡한다등의 이유가 존재할 수 있음
+- 추가로 **입력 화면**으로 이동하는 과정에서
+  - 사용자의 **모티베이션 환기**가 충분하지 않으면,
+  - 아무 이유 없이 양력 양식이 출력되는 인상을 주는 문제도 존재
+
+### TABLE.16.2. 입력 양식 직귀율
+>**일자**|**입력 양식 방문 횟수**|**입력 양식 직귀 수**|**입력 양식 직귀율**
+>-----|-----|-----|-----
+>2016.11.1| 1,382 | 692 |50.10%
+>2016.11.2| 1,463 | 677 |46.30%
+>2016.11.3| 1,311 | 568 |45.60%
+>2016.11.4| 1,289 | 569 |44.10%
+- **입력 화면 방문 횟수**를 분모에 두고,
+  - **입력 양식 직귀 수**의 비율을 집계하면 계산 가능
+
+### CODE.16.3. 입력 양식 직귀율을 집계하는 쿼리
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  form_with_progress_flag AS (
+    SELECT
+      -- PostgreSQL, Hive, Redshift, SparkSQL의 경우 substring으로 날짜 부분 추출
+      substring(stamp, 1, 10) AS dt
+      -- PostgreSQL, Hive, BigQuery, SparkSQL의 경우 substr 사용
+      substr(stamp, 1, 10) AS dt
+      
+      , session
+      -- 입력 화면으로부터의 방문 플래그 계산
+      , SIGN(
+          SUM(CASE WHEN path IN ('/regist/input') THEN 1 ELSE 0 END)
+      ) AS has_input
+      -- 입력 확인 화면 또는 완료 화면으로의 방문 플래그 계산하기
+      , SIGN(
+        SUM(CASE WHEN path IN('/regsit/confirm', '/regist/complete') THEN 1 ELSE 0 END)
+      ) AS has_progress
+    FROM form_log
+    GROUP BY
+      -- PostgreSQL, Redshift, BigQuery의 경우
+      -- SELECT 구문에서 정의한 별칭을 GROUP BY에 지정할 수 있음
+      dt, session
+      -- PostgreSQL, Hive, Redshift, SparkSQL의 경우
+      -- SELECT 구문에서 별칭을 지정하기 이전의 식을 GROUP BY에 지정할 수 있음
+      substring(stamp, 1, 10), session
+  )
+  SELECT
+    dt
+    , COUNT(1) AS input_count
+    , SUM(CASE WHEN has_progress = 0 THEN 1 ELSE 0 END) AS bounce_count
+    , 100.0 * AVG(CASE WHEN has_progrss = 0 THEN 1 ELSE 0 END) AS bounce_rate
+  FROM
+    form_with_progress_flag
+  WHERE
+    -- 입력 화면에 방문했던 세션만 추출하기
+    has_input = 1
+  GROUP BY
+    dt
+  ;
+  ```
+- 세션 별로
+  - 입력 화면(`/regist/input`) 방문 횟수,
+  - 확인 화면(`/regist/confirm`) 방문 횟수,
+  - 완료 화면(`/regist/complete`) 방문 횟수
+  - 를 각각 `SUM(CASE ~)` 구문으로 세고,
+    - `SIGN` 함수를 사용하여 **플래그** 변환
+- 그리고 입력 화면을 **방문 하고 있는 세션**이라는 조건을 사용한 뒤,
+  - 마찬가지로 `SUM(CASE ~)` 구문으로 **직귀 수**를 계산하며,
+  - `AVG(CASE ~)` 구문으로 **직귀율**을 계산
+
+### 원포인트
+- **페이지 열람 로그**를 사용하여, 앞의 리포트를 작성해도,
+  - `입력 시작 후 이탈`인지, `입력 없이 이탈`인지는 판별 불가
+- **16.2**와 같이
+  - `처음 입력한 항목을 클릭한 때` / `처음 입력한 때`에 `js`로 로그를 송신해서 활용해야
+  - 더 정밀하게 **직귀율**계산 가능 
