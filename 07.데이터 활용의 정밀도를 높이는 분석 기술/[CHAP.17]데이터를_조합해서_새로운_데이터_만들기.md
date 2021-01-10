@@ -104,3 +104,74 @@
   - 네트워크 범위의 최소/최대 IP를 계산하고,
     - **비교 가능한 형식으로 변환**해야, 다양하게 활용 가능
 - `CSV` 파일의 데이터를 전처리 해주는 `GeoIP2 CSV Format Converter`등의 도구도 살펴볼 것
+
+## 2. 주말과 공휴일 판단하기
+- 개념
+  - 분석 : 주말/공휴일
+- 일반적인 서비스의 경우 **주말**과 **공휴일**에
+  - **방문 횟수**와 `CV`가 늘어남
+  - 물론 반대의 서비스도 존재
+- 월별로 목표를 세울 때,
+  - 해당 연도와 해당 월에 있는 **주말**과 **공휴일**이 얼마나 되는지 계산하면
+  - 더 정확한 목표를 세울 수 있음
+- 로그 데이터가 **주말**과 **공휴일**에 기록된 것인지 판정하는 방법
+
+### DATA.17.4. 접근 로그(access_log) 테이블
+>**session**|**user\_id**|**action**|**stamp**
+>-----|-----|-----|-----
+>98900e|U001|view|2016-10-01 18:00:00
+>98900e|U001|view|2016-10-01 20:00:00
+>1cf768|U002|view|2016-10-04 23:00:00
+
+### 공휴일 정보 테이블
+- **날짜 데이터**를 사용하면 쉽게 **공휴일**과 **일요일** 파악 가능
+- 하지만 공휴일(설날, 추석)은 판정할 수 없음
+- **공휴일**을 판정하려면 **별도의 데이터**가 필요 함
+- 일반적으로는 공휴일을 저장할 수 있도록 **공휴일 정보 테이블**을 만들어서 사용
+
+#### CODE.17.3. PostgreSQL에서의 주말과 공휴일을 정의하는 방법
+- PostgreSQL
+  ```sql
+  CREATE TABLE mst_calendar(
+    year            integer
+    , month         integer
+    , day           integer
+    , dow           varhcar(10)
+    , dow_num       integer
+    , holiday_name  varchar(255)
+  );
+  ```
+- 테이블 데이터
+  >**year**|**month**|**day**|**dow**|**dow\_num**|**holiday\_name**
+  >-----|-----|-----|-----|-----|-----
+  >2015|1|1|Thu|4|신정
+  >2015|1|2|Fri|5| 
+
+### 주말과 공휴일 판정하기
+- 전처리를 생략하고 `JOIN` 조건으로 바로 날짜를 결합
+  - 실제 운용시에는 성능을 위해 **미리 날짜 전용 컬럼 생성**이 필요
+
+#### CODE.17.4. 주말과 공휴일을 판정하는 쿼리
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  SELECT
+    a.action
+    , a.stamp
+    , c.dow
+    , c.holiday_name
+    -- 주말과 공휴일 판정
+    , c.dow_num IN (0, 6) -- 토요일과 일요일 판정하기
+    OR c.holiday_name IS NOT NULL -- 공휴일 판정하기
+    AS is_day_off
+  FROM
+    access_log AS a
+    JOIN
+      mst_calendar AS c
+      -- 액션 로그의 타임스탬프에서 연, 월, 일을 추출하고 결합하기
+      -- PostgrdSQL, Hive, Redshift, SparkSQL의 경우 다음과 같이 사용
+      -- BigQuery의 경우 substring을 substr, int를 int64로 수정하기
+      ON  CAST(substring(a.stamp, 1, 4) AS int) = c.year
+      AND CAST(substring(a.stamp, 6, 2) AS int) = c.month
+      AND CAST(substring(a.stamp, 9, 2) AS int) = c.day
+  ;
+  ```
