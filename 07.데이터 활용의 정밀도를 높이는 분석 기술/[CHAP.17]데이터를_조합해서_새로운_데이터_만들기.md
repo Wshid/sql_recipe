@@ -175,3 +175,65 @@
       AND CAST(substring(a.stamp, 9, 2) AS int) = c.day
   ;
   ```
+
+## 3. 하루 집계 범위 변경하기
+- 개념
+  - SQL : 날짜/시간 함수
+  - 분석 : 날짜 범위
+- 날짜별로 데이터를 그냥 집계하게 되면
+  - 자정(`0시`)기준으로 데이터가 처리됨
+- 대부분의 서비스는 **자정 전/후**의 사용비율이 꽤 많은 편
+  - 이를 다른 날짜로 구분할 경우 **사용자의 패턴 분석이 어려울 수 있음**
+- **지속률**을 계산하는 경우에도, 등록 시간이 `23:59`이라면
+  - 날짜가 바뀌면서 한 번만 사용해도 **2일간 사용자**로 취급 됨
+- 이번 절에서는
+  - 사용자의 활동이 가장 적은 **오전 4시**정도를 기준으로
+  - 오전 4시부터 다음 날 오전 **오전 3시 59분 59초**까지를 하루로 집계할 수 있게 데이터를 가공하기
+
+### 샘플 데이터
+- 액션 로그를 사용하여 `0시 ~ 4시`까지의 데이터를 **이전 날의 데이터**로 취급
+  - `session, user_id, action, stamp`의 컬럼을 가짐
+
+### 하루 집계 범위 변경
+- **하루 집계 범위**를 **오전 4시**에서 시작하게 변경하고 싶다면,
+  - 타임 스탬프의 시간을 **4시간 당기면 됨**
+- `raw_date`와 `mod_date`(4시간 당긴 날짜)를 구하는 예시
+- `11월 4일 오전 0시 ~ 3시 59분`에 있는 로그가 `11월 3일`로 판정된 것을 볼 수 있음
+
+#### CODE.17.5. 날짜 집계 범위를 오전 4시로부터 변경하는 쿼리
+```sql
+WITH
+action_log_with_mod_stamp AS (
+  SELECT *
+  -- 4시간 전의 시간 계산하기
+  -- PostgreSQL의 경우 interval 자료형의 데이터를 사용해 날짜를 사칙연산 할 수 있음
+  , CAST(stamp::timestamp - '4 hours'::interval AS text) AS mod_stamp
+  -- Redshift의 경우 dateadd 함수 사용하기
+  , CAST(dateadd(hour, -4, stamp::timestamp) AS text) AS mod_stamp
+  -- BigQuery의 경우 timestamp_sub 함수 사용하기
+  , CAST(timestamp_sub(timestamp(stamp), interval 4 hour) AS string) AS mod_stamp
+  -- Hive, SparkSQL의 경우 한 번 unixtime으로 변환한 뒤 초 단위로 계산하고, 다시 타임스탬프로 변환하기
+  , from_unixtime(unix_timestamp(stamp) -4 * 60 * 60) AS mod_stamp
+  FROM action_log
+)
+SELECT
+  session
+  , user_id
+  , action
+  , stamp
+  -- raw_date와 4시간 후를 나타내는 mod_date 추출하기
+  -- PostgreSQL, Hive, Redshift, SparkSQL의 경우 다음과 같이 사용
+  , substring(stamp, 1, 10) As raw_date
+  , subsing(mod_stamp, 1, 10) As mod_date
+  -- BigQuery의 경우 substring을 substr로 수정하기
+  , substr(stamp, 1, 10) AS raw_date
+  , substr(mod_stamp, 1, 10) AS mod_date
+FROM action_log_with_mod_stamp;
+```
+
+### 원포인트
+- 하루 집계 범위를 모든 리포트에 적용한다면
+  - **로그 수집**과 **데이터 집계**에 관련한 배치 처리 시간을
+  - **집계 범위**에 맞게 변경해야 함
+- 날짜를 기반으로 무언가를 **집계/변경**하는 경우
+  - 원본 데이터를 꼭 따로 **백업** 한 뒤 가공해야 함
