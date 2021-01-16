@@ -80,3 +80,138 @@
 - 위 결과를 사용하면
   - 접근 수가 **일정 기준 이하**거나
   - `percent_rank`가 지정값보다 큰 것들을 필터링해서 **접근 수가 적은 레코드**를 제외할 수 있음
+
+## 2. 크롤러 제외하기
+- 개념
+  - SQL : `LIKE` 연산자
+  - 분석 : 크롤러 제외하기
+- 접근 로그에는 사용자 행동 이외에도 `검색 엔진`이나 `도구(크롤러)`가 접근한 로그가 섞임
+- 웹 사이트에 따라 섞이는 **비율**은 다르나
+  - 사용자의 접근 수만큼, 또는 그 이상 `크롤러로부터 접근`이 발생하는 경우도 존재
+- 분석할 때 크롤러의 로그는 **노이즈**가 되므로, 제거한 뒤 분석해야 함
+- 크롤러인지, 사용자인지 판별하려면 `user-agent`를 보고 구분
+- 크롤러 접근 로그를 **처음부터 출력하지 않게** 설정할 수는 있으나,
+  - 새로운 크롤러가 **계속 개발**되므로, 크롤러의 접근 로그는 결국 섞임
+  - **로그**로 저장된 이후에 **제외**하는 것이 좋음
+- **크롤러 접근**도 **크롤러 유도**를 분석할 때 사용할 수 있는 정보
+  - 일단 저장해두면 언제인가 활용 가능함
+
+### 크롤러 접근을 제외하는 방법
+- 두가지 방법
+  - **규칙**을 기반으로 제외하기
+  - **마스터 데이터**를 기반으로 제외하기
+
+#### 규칙을 기반으로 제외하기
+- 크롤러의 `user-agent`에 있는 특징들을 사용하면 쉽게 **제외** 가능
+- 일반적으로 크롤러에는 다음과 같은 **문자열**이 포함되어 있거나, 이름이 붙는다
+- 크롤러 규칙
+  - 특정 문자열 포함 : `bot`, `crawler`, `spider`, ...
+  - 이름 포함 : `Googlebot`, `Baiduspider`, `Yeti`, `Yahoo`, `Timblr`, ...
+
+##### CODE.18.3. 규칙을 기반으로 크롤러를 제외하는 쿼리
+- 새로운 크롤러가 발생했을 때에도 **규칙**만 조금 수정하면, 쉽게 제외가 가능
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  SELECT
+    *
+  FROM
+    action_log_with_noise
+  WHERE
+    NOT
+    -- 크롤러 판정 조건
+    ( user_agent LIKE '%bot%'
+    OR user_agent LIKE '%crawler%'
+    OR user_agent LIKE '%spider%'
+    OR user_agent LIKE '%archiver%'
+    -- 생략
+    )
+  ;
+  ```
+
+#### 마스터 데이터를 사용해 제외하기
+- **규칙**을 사용할 경우,
+  - `SQL`에 직접 규칙을 작성하므로, 규칙이 많아질 수록 `SQL`이 길어지게 됨
+  - 여러 곳에서 이런 규칙을 사용할 경우 `SQL`을 관리하기 번거로울 수 있음
+- 별도의 **크롤러 마스터 데이터**를 만들경우, 이러한 번거로움을 줄일 수 있음
+
+##### CODE.18.4. 마스터 데이터를 사용해 제외하는 쿼리
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  mst_bot_user_agent AS (
+    SELECT '%bot%' AS rule
+    UNION ALL SELECT '%crawler%' AS rule
+    UNION ALL SELECT '%spider%' AS rule
+    UNION ALL SELECT '%archiver%' AS rule
+  )
+  , filtered_action_log AS (
+    SELECT
+      l.stamp, l.session, l.action, l.products, l.url, l.ip, l.user_agent
+      -- UserAgent의 규칙에 해당하지 않는 로그만 남기기
+      -- PostgreSQL, Redshift, BigQuery의 경우 WHERE 구문에 상관 서브쿼리 사용 가능
+    FROM
+      action_log_with_noise AS l
+    WHERE
+      NOT EXISTS (
+        SELECT 1
+        FROM mst_bot_user_agent AS m
+        WHERE
+          l.user_agent LIKE m.rule
+      )
+    -- 상관 서브 쿼리를 사용할 수 없는 경우
+    -- CROSS JOIN으로 마스터 테이블을 결합하고
+    -- HAVING 구문으로 일치하는 규칙이 0(없는) 레코드만 남기기
+    -- PostgreSQL, Hive, Redshift, BigQuery, SparkSQL의 경우
+    FROM
+      action_log_with_noise AS l
+      CROSS JOIN
+        mst_bot_user_agent AS m
+    GROUP BY
+      l.stamp, l.session, l.action, l.products, l.url, l.ip, l.user_agent
+    HAVING SUM(CASE WHEN l.user_agent LIKE m.rule THEN 1 ELSE 0 END) = 0
+  )
+  SELECT
+    *
+  FROM
+    filtered_action_log
+  ;
+  ```
+
+### 크롤러 감시하기
+- 크롤러가 **새로 발생하는지 감지**하려면, 아래 쿼리를 주기적으로 실행
+- **마스터 데이터**를 사용하여 제외한 로그에서
+  - 접근이 많은 `user-agent`를 순위대로 추출한 뒤
+  - 크롤러의 마스터 데이터에서 누락된 `user-agent`가 없는지 확인
+
+#### CODE.18.5. 접근이 많은 사용자 에이전트를 확인하는 쿼리
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  mst_bot_user_agent AS (
+    -- CODE.18.4.
+  )
+  , filtered_action_log AS (
+    -- CODE.18.4.
+  )
+  SELECT
+    user_agent
+    , COUNT(1) AS count
+    , 100.0
+      * SUM(COUNT(1)) OVER(ORDER BY COUNT(1) DESC
+          ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+        / SUM(COUNT(1)) OVER() AS cumulative_ratio
+  FROM
+    filtered_action_log
+  GROUP BY
+    user_agent
+  ORDER BY
+    count DESC
+  ;
+  ```
+- `cumulative_ratio`는 **구성비누계**를 의미
+  - **10.2** 참고
+
+### 정리
+- 접근이 없었던 **크롤러**가 어느 날을 기점으로 많아지거나,
+  - 새로운 크롤러가 추가되는 등의, 상황은 계속 변함
+- 매주 또는 매달 **크롤러 접근 로그**를 확인할 것
