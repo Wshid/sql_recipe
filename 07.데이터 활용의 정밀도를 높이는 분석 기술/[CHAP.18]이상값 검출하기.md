@@ -215,3 +215,72 @@
 - 접근이 없었던 **크롤러**가 어느 날을 기점으로 많아지거나,
   - 새로운 크롤러가 추가되는 등의, 상황은 계속 변함
 - 매주 또는 매달 **크롤러 접근 로그**를 확인할 것
+
+## 3. 데이터 타당성 확인하기
+- 개념
+  - SQL : `AVG(CASE ~)`
+  - 분석 : 데이터 검증
+- 사용자 **로그 데이터**를 사용해 분석할 경우,
+  - 원래의 로그 데이터에 **결손** 또는 **오류**가 있다면, 제대로 분석이 어려움
+- 이번 절에서는
+  - **액션 로그 데이터**의 타당성을 쉽게 확인하는 테크닉 소개
+- 데이터 형태
+  - invalid_avtion_log
+  - session, user_id, action, category, products, amount, stamp
+- 액션 로그 테이블은
+  - **액션**의 종류에 따라 **필수 컬럼**이 다름
+  - `view` 액션에는 `category`, `products`가 필요하지 않음
+  - 상품 금액은 `purchase` 액션만 필요함
+- 로그 데이터가 위 조건에 만족하는지 확인하는 쿼리 작성 방법
+  - 액션들을 `GROUP BY`로 집약하여, **액션** 또는 **사용자 ID**등의 각 컬럼이 만족해야 하는 요건을
+  - `CASE`식으로 판정
+- 이런 컬럼 요건 만족시, `CASE`식의 값은 `1`이 되며, 만족하지 않을경우 `0` 리턴
+- 이러한 `CASE` 식의 값을 `AVG`함수로 집약해서 **로그 데이터 전체의 조건 만족 비율**을 계산
+
+### CODE.18.6. 로그 데이터의 요건을 만족하는지 확인하는 쿼리
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  SELECT
+    action
+    -- session은 반드시 NULL이 아니어야 함
+    , AVG(CASE WHEN session IS NOT NULL THEN 1.0 ELSE 0.0 END) AS session
+    -- user_id는 반드시 NULL이 아니어야 함
+    , AVG(CASE WHEN user_id IS NOT NULL THEN 1.0 ELSE 0.0 END) AS user_id
+    -- category는 action=view의 경우 NULL, 이외의 경우 NULL이 아니어야 함
+    , AVG(
+      CASE action
+        WHEN 'view' THEN
+          CASE WHEN category IS NULL THEN 1.0 ELSE 0.0 END
+        ELSE
+          CASE WHEN category IS NOT NULL THEN 1.0 ELSE 0.0 END
+      END
+    ) as category
+    -- products는 action=view의 경우 NULL, 이외에 NULL이면 X
+    , AVG(
+      CASE action
+        WHEN 'view' THEN
+          CASE WHEN products IS NULL THEN 1.0 ELSE 0.0 END
+        ELSE
+          CASE WHEN products IS NOT NULL THEN 1.0 ELSE 0.0 END
+      END
+    ) AS products
+    -- amount는 action=purchase의 경우 NULL이 아니어야 하며, 이외의 경우는 NULL
+    , AVG(
+      CASE action
+        WHEN 'purchase' THEN
+          CASE WHEN amount IS NOT NULL THEN 1.0 ELSE 0.0 END
+        ELSE
+          CASE WHEN amount IS NULL THEN 1.0 ELSE 0.0 END
+      END
+    ) AS amount
+    -- stamp는 반드시 NULL이 아니어야 함
+    , AVG(CASE WHEN stamp is NOT NULL 1.0 ELSE 0.0 END) AS stamp
+  FROM
+    invalid_action_log
+  GROUP BY
+    action
+  ;
+  ```
+- 모든 데이터가 요건을 만족하는 경우에는 `1.0`의 값을 리턴
+- 데이터가 요건을 만족하지 않는 것이 존재할 경우, `<1.0`의 값을 리턴
+- `AVG`함수와 `CASE`를 활용하면, **로그 데이터의 타당성**파악이 쉬움
