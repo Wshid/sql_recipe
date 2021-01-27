@@ -106,3 +106,181 @@
     - 여러번 데이터를 로드해도 **같은 실행 결과**가 보증되게 만들기
 - 마스터 데이터가 도중에 **갱신**되어, 새로운 데이터와 오래된 데이터가 중복된 경우
   - 새로운 데이터만 남기거나, `timestamp`를 포함하여 **유니크 키**를 구성하는 방법도 고려하기
+
+## 2. 로그 중복 검출하기
+- 개념
+  - SQL : `GROUP BY` 함수, `MIN` 함수, `ROW_NUMBER` 함수, `LAG` 함수
+- 로그 데이터는 `정상적으로 저장된 데이터도 중복되는 경우` 존재
+  - 사용자가 버튼을 2회 연속 클릭
+  - 페이지 새로고침
+- 샘플 데이터
+  - `dup_action_log` 테이블
+  - `session`, `user_id`, `action`, `products`, `action_time`
+
+### 중복 데이터 확인하기
+- **19.1**과 동일하게, 사용자와 상품의 조합을 만들고
+  - 그를 기반으로 중복 레코드 확인
+
+#### CODE.19.4. 사용자와 상품의 조합에 대한 중복을 확인하는 쿼리
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  SELECT
+    user_id
+    , products
+    -- 데이터를 배열로 집약하고, 쉼표로 구분된 문자열로 변환
+    -- PostgreSQL, BigQuery의 경우는 string_agg 사용하기
+    , string_agg(session, ',') AS session_list
+    , string_agg(stamp, ',') AS stamp_list
+    -- Redshift의 경우 listagg 사용하기
+    , listagg(session, ',') AS session_list
+    , listagg(stamp, ',') AS stamp_list
+    -- Hive, SparkSQL의 경우 collect_list, concat_ws 사용
+    , concat_ws(',', collect_list(session)) AS session_list
+    , concat_ws(',', collect_list(stamp)) AS stamp_list
+  FROM
+    dup_action_log
+  GROUP BY
+    user_id, products
+  HAVING
+    COUNT(*) > 1
+  ;
+  ```
+- 이 때, 중복된 로그가 발생 하더라도
+  - session이 다르면서, stamp 차이가 난다면, 정상적으로 별도 액션으로 처리해도 무방
+  - session이 같으면서, stamp 차이가 얼마 나지 않는다면, 중복 및 배제 필요
+
+### 중복 데이터 배제하기
+- `같은 세션 id`, `같은 상품`일 때, `타임 스탬프가 제일 오래된 데이터 남기기`로 정의
+- 중복 배제시에, `GROUP BY`로 집약하고,
+  - `MIN(stamp)`으로 가장 오래된 **타임스탬프**만 추출하는 방법 사용
+
+#### CODE.19.5. GROUP BY와 MIN을 사용해 중복을 배제하는 쿼리
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  SELECT
+    session
+    , user_id
+    , action
+    , products
+    , MIN(stamp) AS stamp
+  FROM
+    dup_action_log
+  GROUP BY
+    session, user_id, action, products
+  ;
+  ```
+- 타임스탬프 이외의 컬럼도 활용해 **중복 제거**가 필요하므로
+  - `MIN`함수나 `MAX`함수 등의 단순 집약 함수를 적용할 수 없는 경우 이 방법 사용 불가
+- 더 일반적인 방법으로는
+  - 원래 데이터에 `ROW_NUMBER` 윈도 함수를 사용하여, 중복 데이터에 **순번**을 부여하고
+  - 부여된 순번을 사용하여 **중복 레코드 중 하나**만 남기게 만드는 방법 존재
+
+#### CODE.19.6. ROW_NUMBER를 사용해 중복을 배제하는 쿼리
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  dup_action_log_with_order_num AS (
+    SELECT
+      *
+      -- 중복된 데이터에 순번 붙이기
+      , ROW_NUMBER()
+          OVER(
+            PARTITION BY session, user_id, action, products
+            ORDER BY stamp
+          ) AS order_num
+    FROM
+      dup_action_log
+  )
+  SELECT
+    session
+    , user_id
+    , action
+    , products
+    , stamp
+  FROM
+    dup_action_log_with_order_num
+  WHERE
+    order_num = 1 -- 순번이 1인 데이터(중복된 것 중에서 가장 앞의 것)만 남기기
+  ;
+  ```
+- 이번 샘플 로그는 `session_id`를 저장하므로
+  - 같은 사용자와 상품의 조합이라도, **세션이 다를경우 다른 로그**
+- 하지만 `session_id`등을 사용할 수 없는 경우 존재
+  - 이 경우, **타임 스탬프 간격 확인**
+
+#### CODE.19.7. 이전 액션으로부터의 경과 시간을 계산하는 쿼리
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  dup_action_log_with_lag_seconds AS (
+    SELECT
+      user_id
+      , action
+      , products
+      , stamp
+      -- 같은 사용자와 상품 조합에 대한 이전 액션으로부터의 경과 시간 계산하기
+      -- PostgreSQL의 경우 timestamp 자료형으로 변환하고 차이를 구한 뒤
+      -- EXTRACT(epoc ~)를 사용해 초 단위로 변경하기
+      , EXTRACT(epoch from stamp::timestamp - LAG(stamp::timestamp)
+          OVER(
+            PARTITION BY user_id, action, products
+            ORDER BY stamp
+          )) AS lag_seconds
+      -- Redshift의 경우 datediff 함수를 초 단위로 지정
+      , datediff(second, LAG(stamp::timestamp)
+          OVER(
+            PARTITION BY user_id, action, products
+            ORDER BY stamp
+          ), stamp::timestamp) AS lag_seconds
+      -- BigQuery의 경우 unix_seconds 함수로 초 단위 UNIX 타임으로 변환하고 차이 구하기
+      , unix_seconds(timestamp(stamp)) - LAG(unix_seconds(timestamp(stamp)))
+          OVER(
+            PARTITION BY user_id, action, products
+            ORDER BY stamp
+      -- SparkSQL의 경우 다음과 같이 프레임 지정 추가
+          ROWS BETWEEN 1 PRECEDING AND 1 PRECEDING
+          ) AS lag_seconds
+    FROM
+      dup_action_log
+  )
+  SELECT
+    *
+  FROM
+    dup_action_log_with_lag_seconds
+  ORDER BY
+    stamp;
+  ```
+- `lag_seconds`
+  - 중복 되지 않은 레코드에서는 `NULL`
+  - `사용자 ID`와 `상품 ID`가 중복되는 레코드의 경우
+    - 타임스탬프를 기반으로 이전 액션에서의 경과 시간 계산
+- 산출한 경과 시간이 일정 시간보다 적을 경우 **중복으로 취급**하여 배제
+
+#### CODE.19.8. 30분 이내의 같은 액션을 중복으로 보고 배제하는 쿼리
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  dup_action_log_with_lag_seconds AS (
+    -- CODE.19.7
+  )
+  SELECT
+    user_id
+    , action
+    , products
+    , stamp
+  FROM
+    dup_action_log_with_lag_seconds
+  WHERE
+    (lag_seconds IS NULL OR lag_seconds >= 30 * 60)
+  ORDER BY
+    stamp
+  ;
+  ```
+- `session_id`를 사용하지 않아도, **타임스탬프**를 활용하면
+  - 일정 시간 이내의 로그를 중복으로 취급 및 배제 가능
+
+### 정리
+- 로그 데이터에 **중복**이 포함된 상태로 리포트를 작성하면
+  - 실제와 다른 값으로 리포트가 만들어져 **잘못된 판단**을 할 수 있음
+- 따라서 분석하는 데이터를 잘 확인하고
+  - 어떤 방침으로 이러한 **중복 제거**를 진행할지 검토해야 함
