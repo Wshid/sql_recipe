@@ -155,3 +155,143 @@
     <> COALESCE(old_mst.updated_at, 'infinity')
   ;
   ```
+
+## 2. 두 순위의 유사도 계산하기
+- 개념
+  - SQL : `RANK` 함수, `SUM` 함수, `COUNT` 함수
+  - 분석 : 스피어만 상관계수(Spearman's Rank Correlation Coefficient)
+- 데이터 분석에서는 **14.2**에서 소개한 3개의 지표
+  - `방문 횟수`, `방문자 수`, `페이지 뷰`
+    - 로 **페이지의 순위**를 작성하는 경우가 많음
+  - 어떻게 조합해야 가장 적합한 점수 매기기가 가능할지
+- 순위들의 **유사도**를 계산하여
+  - 어떤 순위가 **효율적**인지 순위를 **정량적**으로 평가하는 방법 소개
+- 샘플 데이터 : 웹 페이지 접근 로그
+  - stamp, short_session, long_session, path
+
+### 지표들의 순위 작성하기
+- `방문 횟수`, `방문자 수`, `페이지 뷰`를 기반으로 **순위**를 작성하는 쿼리
+
+#### CODE.20.5. 3개의 지표를 기반으로 순위를 작성하는 쿼리
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQueyr`, `SparkSQL`
+  ```sql
+  WITH
+  path_stat AS (
+    -- 경로별 방문 횟수, 방문자 수, 페이지 뷰 계산
+    SELECT
+      path
+      , COUNT(DISTINCT long_session) AS access_users
+      , COUNT(DISTINCT short_session) AS access_count
+      , COUNT(*) AS page_view
+    FROM
+      access_log
+    GROUP BY
+      path
+  )
+  , path_ranking AS (
+    -- 방문 횟수, 방문자 수, 페이지 뷰별로 순위 붙이기
+    SELECT 'access_user' AS type, path, RANK() OVER(ORDER BY access_users DESC) AS rank
+      FROM path_stat
+    UNION ALL
+      SELECT 'access_count' AS type, path, RANK() OVER(ORDER BY access_count DESC) AS rank
+      FROM path_stat
+    UNION ALL
+      SELECT 'page_view' AS type, path, RANK() OVER(ORDER BY page_view DESC) AS rank
+      FROM path_stat
+  )
+  SELECT *
+  FROM
+    path_ranking
+  ORDER BY
+    type, rank
+  ;
+  ```
+- 위 코드의 결과를 보면 `type` 컬럼에 지표의 종류인
+  - `access_count`, `access_user`, `page_view`가 저장되어야 함
+- 각 지표별로 `/top`, `/detail`, `/search`라는 **3개의 페이지 순위**를 출력
+
+### 경로별 순위들의 차이 계산하기
+- 위 출력 결과를 기반으로 **경로와 순위 조합**을 만들고 **순위 차이** 계산
+- **순위 차이**(diff)는 **양쪽 순위 차이의 제곱**으로 정의
+
+#### CODE.20.6. 경로들의 순위 차이를 계산하는 쿼리
+- **경로**를 키로 삼아 **순위**를 자기 결합하고
+  - 두 지표 기반의 **순위 차이**를 계산
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQueyr`, `SparkSQL`
+  ```sql
+  WITH
+  path_stat AS (
+    -- CODE.20.5.
+  )
+  , path_ranking AS (
+    -- CODE.20.5.
+  )
+  , pair_ranking AS (
+    SELECT
+      r1.path
+      , r1.type AS type1
+      , r1.rank AS rank1
+      , r2.type AS type2
+      , r2.rank AS rank2
+      -- 순위 차이 계산하기
+      , POWER(r1.rank - r2.rank, 2) AS diff
+    FROM
+      path_ranking AS r1
+      JOIN
+        path_ranking AS r2
+        ON r1.path = r2.path
+  )
+  SELECT
+    *
+  FROM
+    pair_ranking
+  ORDER BY
+    type1, type2, rank1
+  ;
+  ```
+- 실행결과 분석 방법
+  - 같은 지표를 기반으로 `diff`를 계산시, `0`
+- `방문 횟수`와 `방문자 수` 비교에서는
+  - `/top`이 각각 **1위**와 **3위**이므로 `(1-3)^2 = 4`
+
+### 스피어만 상관계수 계산하기
+- **경로별 순위 차이** 계산이 아닌, **순위 전체의 유사도 계산**
+- `Spearman's Rank Correlation Coefficient`로 **순위의 유사도**를 계산
+  - 두 개의 순위가 **완전 일치**시 `1.0`, 완전히 일치하지 않는 경우 `-1.0`을 가짐
+
+#### CODE.20.7. 스피어만 상관계수로 순위의 유사도를 계산하는 쿼리
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQueyr`, `SparkSQL`
+  ```sql
+  WITH
+  path_stat AS (
+    -- CODE.20.5.
+  )
+  , path_ranking AS (
+    -- CODE.20.5.
+  )
+  , pair_ranking AS (
+    -- CODE.20.6.
+  )
+  SELECT
+    type1
+    , type2
+    -- 스피어만 상관계수 계산
+    , 1 - (6.0 * SUM(diff) / (POWER(COUNT(1), 3) - COUNT(1))) AS spearman
+  FROM
+    ir_ranking
+  GROUP BY
+    type1, type2
+  ORDEr BY
+    type1, spearman DESC
+  ;
+  ```
+- 해석 방법
+  - 같은 지표의 순위 비교의 경우, 순위가 완전히 일치하기 때문에 `1.0` 리턴
+  - **방문자 수**와 **페이지 뷰**의 순위 비교에서는, 순위의 순위 자체가 다르므로
+    - 스피어만 상관계수 값이 `-1.0`으로 나타냄
+
+### 정리
+- 두 순위의 유사도를 **수치**로 표현할 수 있다면
+  - 서로 다른 점수를 기반으로 만든 순위가 어떤 **유사성**을 갖는지 확인 가능
+- 이를 활용하면, 순위를 기반으로 **다른 지표**와의 유사성을 구하고
+  - 이를 기반으로 **이상적인 순위**를 자동 생성할 수 있음
