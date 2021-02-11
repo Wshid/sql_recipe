@@ -146,3 +146,146 @@
 - 이번 절에서는 `Free Keyword Search`를 전제로 설명 했지만
   - 조건을 선택하는 **카테고리 검색**에서도 `NoMatch` 비율이 중요한 지표가 될 수 있음
 - 어떤 경우에도 검색 결과가 `0`이 나오지 않도록, 여러가지 대책을 세우기
+
+
+## 2. 재검색 비율과 키워드 집계하기
+- 개념
+  - SQL : `LEAD`함수, `SUM(CASE~)`, `AVG(CASE~)`
+  - 분석 : 재검색 비율, 재검색 키워드
+- 검색 결과에 만족하지 못해, **새로운 키워드**로 검색한 사용자의 행동은
+  - 검색을 어떻게 **개선**하면 좋을지 좋은 지표가 됨
+
+### 재검색 비율 집계하기
+- **재검색 비율**이란
+  - 사용자가 검색 결과의 **출력**과 관계 엾이
+  - 어떤 결과도 클릭하지 않고, 새로 검색을 **실행한 비율**을 나타냄
+- **재검색 비율**을 **사용자의 행동 로그**에서 어떻게 집계할지 생각 필요
+- 검색 결과 출력 로그(`action=search`)와 검색 화면에서
+  - 상세 화면으로의 이동 로그(`action=detail`)를 시계열 순서로 나열해서
+  - 각각의 줄에 다음 줄의 액션을 기록
+- 다음 줄의 액션을 **윈도 함수**로 추출하는 쿼리
+
+#### CODE.21.3. 검색 화면과 상세 화면의 접근 로그에 다음 줄의 액션을 기록하는 쿼리
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  access_log_With_next_action AS (
+    SELECT
+      stamp
+      , session
+      , action
+      , LEAD(action)
+      -- PostgreSQL, Hive, Redshift, BigQuery의 경우
+      OVER(PARTITION BY session ORDER BY stamp ASC)
+      -- SparkSQL, Frame 지정 필요
+      OVER(PARTITION BY session ORDER BY stamp ASC
+        ROWS BETWEEN 1 FOLLOWING AND 1 FOLLOWING)
+          AS next_action
+    FROM
+      access_log
+  )
+  SELECT *
+  FROM access_log_with_next_Action
+  ORDER BY
+    session, stamp
+  ;
+  ```
+- `action`과 `next_action` 모두가 `search`인 레코드는 **재검색 수**를 의미
+- 추가로 `action=search`인 레코드를 집계하고
+  - 이를 검색 총 수로 보면, 두 값을 통해 재검색 비율 집계 가능
+
+#### CODE.21.4. 재검색 비율을 집계하는 쿼리
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  access_log_with_next_action AS (
+    -- CODE.21.3.
+  )
+  SELECT
+    -- PostgreSQL, Hive, Redshift, SparkSQL, substring으로 날짜 부분 추출
+    substring(stamp, 1, 10) AS dt
+    -- PostgreSQL, Hive, BigQuery, SparkSQL, substr 사용
+    , substr(stamp, 1, 10) AS dt
+    , COUNT(1) AS search_count
+    , SUM(CASE WHEN next_action = 'search' THEN 1 ELSE 0 END) AS retry_count
+    , AVG(CASE WHEN next_action = 'search' THEN 1.0 ELSE 0.0 END) AS retry_rate
+  FROM
+    access_log_with_next_action
+  WHERE
+    action = 'search'
+  GROUP BY
+    -- PostgreSQL, Redshift, BigQuery
+    -- SELECT 구문에서 정의한 별칭을 GROUP BY 지정 가능
+    dt
+    -- PostgreSQL, Hive, Redshift, SparkSQL의 경우
+    -- SELECT 구문에서 별칭을 지정하기 이전의 식을 GROUP BY 지정 가능
+    substring(stamp, 1, 10)
+  ORDER BY
+    dt
+  ;
+  ```
+
+### 재검색 키워드 집계하기
+- **재검색 키워드**를 집계하면
+  - **동의어 사전**이 `흔들림을 잡지 못하는 범위 확인`이 가능
+- 추가로 컨텐츠 명칭의 **새로운 흔들림**과
+  - 사람들이 일반적으로 해당 컨텐츠를 **부르는 이름**을 찾는 척도가 됨
+- 사용자들이
+  - 어떤 검색어로 **재검색** 했는지 확인 및 집계 이후
+  - 대처해야 하는 부분이 있다면 **동의어 사전 반영** 필요
+
+#### CODE.21.5. 재검색 키워드를 집계하는 쿼리
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  access_log_with_next_search AS (
+    SELECT
+      stamp
+      , session
+      , action
+      , keyword
+      , result_num
+      , LEAD(action)
+        -- PostgreSQL, Hive, Redshift, BigQuery
+        OVER(PARTITION BY session ORDER BY stamp ASC)
+        -- SparkSQL, 프레임 지정
+        OVER(PARTITION BY session ORDER BY stamp ASC
+          ROWS BETWEEN 1 FOLLOWING AND 1 FOLLOWING)
+        AS next_action
+      , LEAD(keyword)
+        -- PostgreSQL, Hive, Redshift, BigQuery
+        OVER(PARTITION BY session ORDER BY stamp ASC)
+        -- SparkSQL, 프레임 지정
+        OVER(PARTITION BY session ORDER BY stamp ASC
+          ROWS BETWEEN 1 FOLLOWING AND 1 FOLLOWING)
+        AS next_keyword
+      , LEAD(result_num)
+        -- PostgreSQL, Hive, Redshift, BigQuery
+        OVER(PARTITION BY session ORDER BY stamp ASC)
+        -- SparkSQL, 프레임 지정
+        OVER(PARTITION BY session ORDER BY stamp ASC
+          ROWS BETWEEN 1 FOLLOWING AND 1 FOLLOWING)
+        AS next_result_num
+    FROM
+      access_log
+  )
+  SELECT
+    keyword
+    , result_num
+    , COUNT(1) AS retry_count
+    , next_keyword
+    , next_result_num
+  FROM
+    access_log_with_next_search
+  WHERE
+    action = 'search'
+    AND next_action = 'search'
+  GROUP BY
+    keyword, result_num, next_keyword, next_result_num
+  ```
+
+### 원포인트
+- 동의어 사전을 사람이 직접 관리하는 것은 매우 힘들며,
+  - 담당자의 실수로 `흔들림 제거`가 되지 않을 수 있음
+- 따라서 **재검색 키워드**를 집계하고
+  - 검색 시스템이 **자동으로 흔들림 제거하도록 개선**하는 방법이 좋음
