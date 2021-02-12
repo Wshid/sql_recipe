@@ -289,3 +289,126 @@
   - 담당자의 실수로 `흔들림 제거`가 되지 않을 수 있음
 - 따라서 **재검색 키워드**를 집계하고
   - 검색 시스템이 **자동으로 흔들림 제거하도록 개선**하는 방법이 좋음
+
+## 3. 재검색 키워드를 분류해서 집계하기
+- 개념
+  - SQL : `LIKE`
+  - 분석 : 재검색 킹워드
+- 사용자가 **재검색** 했다는 것은
+  - 검색 결과에 만족하지 못했으며,
+  - 다른 **동기**가 있다는 것을 의미
+- 특정 패턴을 볼 때
+  - 사용자가 어떤 키워드로 검색/변경 여부를 확인할 수 있다면
+  - 이를 **동의어 사전**과 **사용자 사전 추가 후보**로 확인 가능
+    - 검색 개선 가능성 존재
+
+### 재검색의 동기
+- `NoMatch`에서의 조건 변경
+  - 검색 결과가 `0`개 이므로, **다른 검색어**로 검색
+- 검색 필터링
+  - 검색 결과가 너무 많으므로, 단어를 필터링
+- 검색 키워드 변경
+  - 검색 결과가 나오기는 했으나, **다른 검색어**로 재검색
+
+### NoMatch에서의 조건 변경
+- `NoMatch`에서 조건을 변경했다면,
+  - 해당 키워드는 **동의어 사전**과 **사용자 사전에 추가할 키워드 후보**를 의미
+
+#### CODE.21.6. NoMatch에서 재검색 키워드를 집계하는 쿼리
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  access_log_with_next_search AS (
+    -- CODE.21.5
+  )
+  SELECT
+    keyword
+    , result_num
+    , COUNT(1) AS retry_count
+    , next_keyword
+    , next_result_num
+  FROM
+    access_log_with_next_search
+  WHERE
+    action = 'search'
+    AND next_Action = 'search'
+    -- NoMatch 로그만 필터링하기
+    AND result_num = 0
+  GROUP BY
+    keyword, result_num, next_keyword, next_result_num
+  ```
+
+### 검색 결과 필터링
+- 재검색한 **검색 키워드**가 원래의 검색 키워드를 **포함** 하고 있다면
+  - 검색을 조금 더 **필터링**하고 싶은 의미일 수 있음
+- 자주 사용되는 **필터링 키워드**가 있다면
+  - 이를 원래 키워드로 검색 했을 때
+  - **연관 검색어** 등으로 출력하여, 사용자가 요구하는 컨텐츠로 빠르게 유도 가능
+
+#### CODE.21.7. 검색 결과 필터링 시의 재검색 키워드를 집계하는 쿼리
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  access_log_with_next_search AS (
+    -- CODE.21.5.
+  )
+  SELECT
+    keyword
+    , result_num
+    , COUNT(1) AS retry_count
+    , next_keyword
+    , next_result_num
+  FROM
+    access_log_with_next_search
+  WHERE
+    action = 'search'
+    AND next_action = 'search'
+    -- 원래 키워드를 포함하는 경우만 추출하기
+    -- PostgreSQL, Hive, BigQuery, SparkSQL, concat 함수 사용
+    AND next_keyword LIKE concat('%', keyword, '%')
+    -- PostgreSQL, Redshift, || 연산자 사용
+    AND next_keyword LIKE '%' || keyword || '%'
+  GROUP BY
+    keyword, result_num, next_keywrod, next_result_num
+  ;
+  ```
+
+### 검색 키워드 변경
+- 완전히 다른 검색 키워드를 이용하여 재검색 했을 경우
+  - 원래 검색 키워드를 사용한 검색 결과에 **원하는 내용이 없음**
+- **동의어 사전**이 정상 동작하지 않음
+- 완전히 다른 검색 키워드로 검색했을 경우
+  - 분명 **이유**가 있을 것
+  - 집계하여 확인
+
+#### CODE.21.7. 검색 키워드를 변경 때 재검색을 집계하는 쿼리
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  access_log_with_next_search AS (
+    -- CODE.21.5.
+  )
+  SELECT
+    keyword
+    , result_num
+    , COUNT(1) AS retry_count
+    , next_keyword
+    , next_result_num
+  FROM
+    access_log_with_next_search
+  WHERE
+    action = 'search'
+    AND next_action = 'search'
+    -- 원래 키워드를 포함하지 않는 검색 결과만 추출
+    -- PostgreSQL, Hive, BigQuery, SparkSQL, concat 함수 사용
+    AND next_keyword NOT LIKE concat('%', keyword, '%')
+    -- PostgreSQL, Redshift, || 연산자 사용
+    AND next_keyword NOT LIKE '%' || keyword || '%'
+  GROUP BY
+    keyword, result_num, next_keyword, next_result_num
+  ;
+  ```
+
+### 정리
+- 위 세가지 경우 모두 매우 다른 결과를 노출함
+  - 세가지를 모두 **집계**하여 활용할 것
