@@ -412,3 +412,86 @@
 ### 정리
 - 위 세가지 경우 모두 매우 다른 결과를 노출함
   - 세가지를 모두 **집계**하여 활용할 것
+
+## 4. 검색 이탈 비율과 키워드 집계하기
+- 개념
+  - SQL : `SUM(CASE ~)`, `AVG(CASE ~)`
+  - 분석 : 검색이탈률, 검색 이탈 키워드
+- 검색 결과가 출력된 이후
+  - 어떤 액션도 취하지 않고, 이탈한 사용자는 **검색에 만족하지 못한 경우**
+- 검색 결과 화면에서 사용자가 이탈한다면
+  - 검색 결과가 `0개`이거나
+  - 원하는 결과가 나오지 않은 경우
+- 이러한 사용자가 얼마나 존재하는지 집계하고
+  - 그 때의 **키워드**를 확인하면, 여러가지 개선 가능
+
+### 검색 이탈 집계 방법
+- **CODE.21.3**의 결과를 활용
+  - `action=search, next_action is NULL` : 검색 이탈
+- `action=search`임을 **검색 총 수**로 활용하여
+  - `검색 이탈 수 / 검색 총 수 = 검색 이탈 비율` 추산 가능
+
+#### CODE.21.10. 검색 이탈 비율을 집계하는 쿼리
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  access_log_With_next_action AS (
+    -- CODE.21.9
+  )
+  SELECT
+    -- PostgreSQL, Hive, Redshift, SparkSQL, substring으로 날짜 추출
+    substring(stamp, 1, 10) AS dt
+    -- PostgreSQL, Hive, BigQuery, SparkSQL, substr 사용
+    substr(stamp, 1, 10) AS dt
+    , COUNT(1) AS search_count
+    , SUM(CASE WHEN next_action IS NULL THEN 1 ELSE 0 END) AS exit_count
+    , AVG(CASE WHEN next_action IS NULL THEN 1.0 ELSE 0.0 END) AS exit_rate
+  FROM
+    access_log_with_next_action
+  WHERE
+    action = 'search'
+  GROUP BY
+    -- PostgreSQL, Redshift, BigQuery
+    -- SELECT 구문에서 정의한 별칭을 GROUP BY에 지정 가능
+    dt
+    -- PostgreSQL, Hive, Redshift, SparkSQL
+    -- SELECT 구문에서 별칭을 지정하기 이전의 식을 GROUP BY에 지정 가능
+    substring(stamp, 1, 10)
+  ORDER BY
+    dt
+  ;
+  ```
+
+### 검색 이탈 키워드 집계하기
+- 검색 이탈이 발생했을 때 **검색한 키워드**를 추출하는 쿼리
+- 검색 이탈 키워드를 활용하면
+  - **동의어 사전 추가**등의 여러 가지 조치를 취해 검색 개선 가능
+
+#### CODE.21.11. 검색 이탈 키워드를 집계하는 쿼리
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  access_log_with_next_search AS (
+    -- CODE.21.5
+  )
+  SELECT
+    keyword
+    , COUNT(1) AS search_count
+    , SUM(CASE WHEN next_action IS NULL THEN 1 ELSE 0 END) AS exit_count
+    , AVG(CASE WHEN next_action IS NULL THEN 1.0 ELSE 0.0 END) AS exit_rate
+    , result_num
+  FROM
+    access_log_with_next_search
+  WHERE
+    action='search'
+  GROUP BY
+    keyword, result_num
+    -- 키워드 전체의 이탈률을 계산한 후, 이탈률이 0보다 큰 키워드만 추출하기
+  HAVING
+    SUM(CASE WHEN next_action IS NULL THEN 1 ELSE 0 END) > 0
+  ```
+
+### 원포인트
+- 검색에서 이탈한 사용자가 검색 결과에 만족하지 못하는 이유는 다양함
+  - e.g. 원하는 상품이 **상위에 표시되지 않음** 등의 출력 순서 관련 이슈
+- 참고로 **정렬 순서 평가 지표**에 대한 내용은 **21.6** 참고
