@@ -495,3 +495,38 @@
 - 검색에서 이탈한 사용자가 검색 결과에 만족하지 못하는 이유는 다양함
   - e.g. 원하는 상품이 **상위에 표시되지 않음** 등의 출력 순서 관련 이슈
 - 참고로 **정렬 순서 평가 지표**에 대한 내용은 **21.6** 참고
+
+## 5. 검색 키워드 관련 지표의 집계 효율화 하기
+- `NoMatch` 비율, `재검색` 비율, `검색 이탈` 비율
+- 각각의 지표과 **검색 키워드**를 산출하기 위해
+  - 매번 비슷한 쿼리를 작성하는 것은 비효율적
+- 따라서 다음과 같이 **집계 효율화**를 위한
+  - **중간 데이터 생성 SQL**을 사용
+
+### CODE.21.12. 검색과 관련된 지표를 집계하기 쉽게 중간 데이터를 생성하는 쿼리
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  access_log_with_next_search AS (
+    -- CODE.21.5
+  )
+  , search_log_with_next_action (
+    SELECT *
+    FROM
+      access_log_with_next_search
+    WHERE
+      action = 'search'
+  )
+  SELECT *
+  FROM search_log_with_next_action
+  ORDER BY
+    session, stamp
+  ;
+  ```
+
+### 원포인트
+- 앞의 출력 결과를 사용하면 `NoMatch` 수, `재검색` 수, `검색 이탈 수`를 포함해
+  - 키워드 등을 간단하게 집계 가능
+- 이러한 출력 결과를 테이블로 저장하거나,
+  - 검색과 관련된 지표를 **전처리**하는, 정형화된 `WITH`구문으로 활용하면
+  - 작업 효율을 높일 수 있음
