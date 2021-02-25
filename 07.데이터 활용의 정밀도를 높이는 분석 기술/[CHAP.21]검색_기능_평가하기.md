@@ -530,3 +530,180 @@
 - 이러한 출력 결과를 테이블로 저장하거나,
   - 검색과 관련된 지표를 **전처리**하는, 정형화된 `WITH`구문으로 활용하면
   - 작업 효율을 높일 수 있음
+
+## 6. 검색 결과의 포괄성을 지표화하기
+- 개념
+  - SQL : `FULL OUTER JOIN`, `SUM` 윈도 함수
+  - 분석 : 재현율
+- **검색 키워드**에 대한 지표를 사용하여
+  - **검색 엔진 자체의 정밀도**를 평가하는 방법
+- 이를 활용하면, 정밀도를 사람이 하나하나 평가하지 않아도 
+  - 기계적으로 **자동화** 가능
+- 샘플 데이터
+  - 검색 키워드에 대한 검색 결과 순위(**DATA.21.2**) : search_result
+    - keyword, rank, item
+  - 검색 키워드에 대한 정답 아이템(**DATA.21.3**) : correct_result
+    - keyword, item
+    - 검색 키워드에 대해 올바른 결과를 나타낸 아이템을 미리 정리한 것
+
+### 재현율(Recall)을 사용해 검색의 포괄성 평가하기
+- 검색 엔진을 **정량적**으로 평가하는 대표적인 지표로
+  - 재현율(`Recall`)과 정확률(`Precision`)이 존재
+- 재현율
+  - 어떤 키워드의 검색 결과에서
+    - 미리 준비한 **정답 아이템**이 얼마나 나왔는지 비율로 표기
+  - 특정 키워드 10개의 검색 결과가 나왔으면 할때
+    - 실제 4개만 나온다면, `40%`의 재현율
+- 재현율을 집계하려면
+  - 일단 **검색 결과**와 **정답 아이템**을 결합하고
+  - 어떤 아이템이 **정답 아이템**에 포함되는지 판단해야 함
+
+#### CODE.21.13. 검색 결과와 정답 아이템을 결합하는 쿼리
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  search_result_with_correct_items AS (
+    SELECT
+      COALESCE(r.keyword, c.keyword) AS keyword
+      , r.rank
+      , COALESCE(r.item, c.item) AS item
+      , CASE WHEN c.item IS NOT NULL THEN 1 ELSE 0 END AS correct
+    FROM
+      search_result AS r
+      FULL OUTER JOIN
+        correct_result AS c
+        ON r.keyword = c.keyword
+        AND r.item = c.item
+  )
+  SELECT *
+  FROM
+    search_Result_with_correct_items
+  ORDER BY
+    keyword, rank
+  ;
+  ```
+- `correct` 컬럼의 플래그가 `1`인 아이템이
+  - **정답 아이템**에 포함된 아이템
+- `OUTER JOIN`을 사용해
+  - 검색 결과에 포함되지 않은 **정답 아이템 레코드**를 남긴다
+    - 재현율을 계산하려면 **정답 아이템의 총 수**를 구해야하기 때문
+
+#### CODE.21.14. 검색 상위 n개의 재현율을 계산하는 쿼리
+- 상위 `n`개의 정답 아이템 히트 수는, `SUM` 윈도 함수를 사용하여
+  - 누계 정답 아이템 플래그를 모두 합하여 계산
+  - 이 값을 **정답 항목 총 수**로 나누면 **재현율**을 구할 수 있음
+- 검색 결과에 포함되지 않은 아이템의 레코드는
+  - 재현율을 계산할 수 없음 -> 편의상 `0`으로 출력
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  search_result_with_correct_items AS (
+    -- CODE.21.13.
+  )
+  , search_result_with_recall AS (
+    SELECT
+      *
+      -- 검색 결과 상위에서, 정답 데이터에 포함되는 아이템 수의 누계 계산
+      , SUM(corret)
+      -- rank=NULL, 아이템의 정렬 순서에 마지막에 위치
+      -- 편의상 가장 큰 값으로 변환
+        OVER(PARTITION BY keyword ORDER BY COALESCE(rank, 100000) ASC
+          ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cum_correct
+      , CASE
+        -- 검색 결과에 포함되지 않은 아이템은 편의상 적합률을 0으로 다루기
+        WHEN rank IS NULL THEN 0.0
+        ELSE
+          100.0
+          * SUM(correct)
+              OVER(PARTITION BY keyword ORDER BY COALESCE(rank, 100000) ASC
+                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+              / SUM(correct) OVER(PARTITION BY keyword)
+          END AS recall
+      FROM
+        search_Result_with_correct_items
+  )
+  SELECT *
+  FROM
+    search_result_with_recall
+  ORDER BY
+    keyword, rank
+  ;
+  ```
+
+### 재현율의 값을 집약해서 비교하기 쉽게 만들기
+- 위 코드에서 구한 재현율은 **검색 결과 전체 레코드**에 대한 재현율
+  - 이 값으로 **검색 엔진 평가**는 어려움
+- 검색 엔진을 **정량적**으로 평가하고
+  - 여러 개의 **검색 엔진 비교**하려면
+  - 하나의 **대표값**으로 집약하는 것이 바람직
+- **검색 엔진**의 일반적인 인터페이스는
+  - 검색 결과 `상위 n개`를 순위 형식으로 출력
+  - 각 검색 키워드에 대한 **재현율**을 사용자에게 출력되는 **아이템 개수**로 한정해서 구하는 것이 좋음
+    - 첫번째 페이지에 재현되는 아이템이 몇개인지를 구하는 것이 좋다는 의미
+
+#### CODE.21.15. 검색 결과 상위 5개의 재현율을 키워드별로 추출하는 쿼리
+- 검색 결과의 출력 결과가 `default=5`로 가정하여
+  - 재현율을 **키워드**별 계산
+- 검색 결과가 `5`개 이상이라면, 상위 `5`개로 재현율을 구하고
+  - 검색 결과가 `5`개보다 적을 경우, **검색 결과 전체**를 기반으로 재현율을 구함
+- 검색 결과가 없다면 재현율은 `0`
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  search_result_with_correct_items AS (
+    -- CODE.21.13
+  )
+  , search_result_with_recall AS (
+    -- CODE.21.14
+  )
+  , recall_over_rank_5 AS (
+    SELECT
+      keyword
+      , rank
+      , recall
+      -- 검색 결과 순위가 높은 순서로 번호 붙이기
+      -- 검색 결과에 나오지 않는 아이템은 편의상 0으로 다루기
+      , ROW_NUMBER()
+          OVER(PARTITION BY keyword ORDER BY COALESCE(rank, 0) DESC)
+        AS desc_number
+    FROM
+      search_result_with_recall
+    WHERE
+      -- 검색 결과 상위 5개 이하 또는 검색 결과에 포함되지 않은 아이템만 출력
+      COALESCE(rank, 0) <= 5
+  )
+  SELECT
+    keyword
+    , recall AS recall_at_5
+  FROM recall_over_rank_5
+  -- 검색 결과 상위 5개 중에서 가장 순위가 높은 레코드 추출하기
+  WHERE desc_number = 1
+  ;
+  ```
+
+#### CODE.21.16. 검색 엔진 전체의 평균 재현율을 계산하는 쿼리
+- 위 코드에서 검색 키워드의 재현율 집약 이후, 마지막으로 전체적인 **재현율 평균** 구하기
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  search_result_with_correct_items AS (
+    -- CODE.21.13
+  )
+  , search_result_with_recall AS (
+    -- CODE.21.14
+  )
+  , recall_over_rank_5 AS (
+    -- CODE.21.15
+  )
+  SELECT
+    avg(recall) AS average_recall_at_5
+  FROM recall_over_rank_5
+  -- 검색 결과 상위 5개 중에서 가장 순위가 높은 레코드 추출하기
+  WHERE desc_number = 1
+  ;
+  ```
+
+### 정리
+- 재현율은 **정답 아이템**에 포함되는 아이템을
+  - 어느 정도 망라할 수 있는지를 나타내는 지표
+- 재현율은 **의학** 또는 **법** 관련 정보를 다룰 때도 많이 사용됨
