@@ -707,3 +707,126 @@
 - 재현율은 **정답 아이템**에 포함되는 아이템을
   - 어느 정도 망라할 수 있는지를 나타내는 지표
 - 재현율은 **의학** 또는 **법** 관련 정보를 다룰 때도 많이 사용됨
+
+## 7. 검색 결과의 타당성을 지표화하기
+- 개념
+  - SQL : `FULL OUTER JOIN`, `SUM` 윈도 함수
+  - 분석 : 정확률
+- 검색 결과를 평가할 때 사용하는 지표중 하나인 **정확률**(Precision)
+  - 간단하게 **정밀도**라고 부르기도 함
+- **정확률**은
+  - 검색 결과에 포함되는 아이템 중, **정답 아이템**이 어느 정도 비율로 포함되는가를 나타냄
+  - e.g. 검색 결과 상위 10개에 5개의 정답 아이템이 포함되어 있다면, `정확률은 50%`
+
+### 정확률(Precision)을 사용해 검색의 타당성 평가하기
+- 검색 결과 상위 `n`개의 정확률을 계산하는 쿼리
+- 재현율과 거의 유사하나
+  - 분모 부분만 **검색 결과 순위까지의 누계 아이템 수**로 변경
+  - 이전과 동일하게, 검색 결과에 포함되지 않은 아이템의 레코드도
+    - 편의상 정확률을 `0`으로 계산
+
+#### CODE.21.17. 검색 결과 상위 n개의 정확률을 계산하는 쿼리
+```sql
+WITH
+search_result_with_Correct_items AS (
+  -- CODE.21.13
+)
+, search_result_with_precision AS (
+  SELECT
+    *
+    -- 검색 결과의 상위에서 정답 데이터에 포함되는 아이템 수의 누계 구하기
+    , SUM(correct)
+      -- rank가 NULL이라면 정렬 순서의 마지막에 위치하므로
+      -- 편의상 굉장히 큰 값으로 변환하기
+      OVER(PARTITION BY keyword ORDER BY COALESCE(rank, 100000) ASC
+        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cum_correct
+    , CASE
+      -- 검색 결과에 포함되지 않은 아이템은 편의상 적합률을 0으로 다루기
+        WHEN rank IS NULL THEN 0.0
+        ELSE
+          100.0
+          * SUM(correct)
+              OVER(PARTITION BY keyword ORDER BY COALESCE(rank, 100000) ASC
+                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+          -- 재현률과 다르게, 분모에 검색 결과 순위까지의 누계 아이템 수 지정하기
+          / COUNT(1)
+              OVER(PARTITION BY keyword ORDER BY COALESCE(rank, 100000) ASC
+                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+        END AS precision
+  FROM
+    search_result_with_correct_items
+)
+SELECT *
+FROM
+  search_result_with_precision
+ORDER BY
+  keyword, rank
+;
+```
+
+### 정확률 값을 집약해서 비교하기 쉽게 만들기
+- 키워드마다 값을 집약하기
+- 검색 결과 상위 5개의 정확률을 키워드로 추출
+  - 재현율을 계산할 때 사용한 쿼리와 거의 같음
+- 검색 결과 상위 `n`개의 정확률은 `P@n`이라고 표기
+
+#### CODE.21.18. 검색 결과 상위 5개의 정확률을 키워드별로 추출한 쿼리
+```sql
+WITH
+search_result_with_correct_items AS (
+  -- CODE.21.13
+)
+, search_result_with_precision AS (
+  -- CODE.21.17
+)
+, precision_over_rank_5 AS (
+  SELECT
+    keyword
+    , rank
+    , precision
+    -- 검색 결과 순위가 높은 순서로 번호 붙이기
+    -- 검색 결과에 나오지 않는 아이템은 편의상 0으로 다루기
+    , ROW_NUMBER()
+        OVER(PARTITION BY keyword ORDER BY COALESCE(rank, 0) DESC) AS desc_number
+  FROM
+    search_result_with_precision
+  WHERE
+    -- 검색 결과의 상위 5개 이하 또는 검색 결과에 포함되지 않는 아이템만 출력하기
+    COALESCE(rank, 0) <= 5
+)
+SELECT
+  keyword
+  , precision AS precision_at_5
+FROM precision_over_rank_5
+  -- 검색 결과의 상위 5개 중에서 가장 순위가 높은 레코드만 추출하기
+  WHERE desc_number = 1;
+```
+
+#### CODE.21.19. 검색 엔진 전체의 평균 정확률을 계산하는 쿼리
+- 검색 키워드들의 정확률을 추출한 이후
+  - 정확률의 **평균**을 구하고,
+  - 검색 엔진 전체의 **평균 정확률**을 구하기
+```sql
+WITH
+search_Result_With_correct_items AS (
+  -- CODE.21.13
+)
+, search_Result_with_precision AS (
+  -- CODE.21.17
+)
+, preceision_over_rank_5 AS (
+  -- CODE.21.18
+)
+SELECT
+  AVG(precision) AS average_precision_at_5
+FROM precision_over_rank_5
+-- 검색 결과 상위 5개 중에서 가장 순위가 높은 레코드만 추출하기
+WHERE desc_number=1
+;
+```
+
+### 정리
+- 정확률은 **검색 결과 상위**에 출력되는
+  - **아이템의 타당성**을 나타내는 지표
+- 이 지표는 **웹 검색**등
+  - 방대한 데이터 검색에서 **적절한 검색 결과**를 빠르게 찾고 싶은 경우에 중요한 지표
