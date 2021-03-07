@@ -830,3 +830,165 @@ WHERE desc_number=1
   - **아이템의 타당성**을 나타내는 지표
 - 이 지표는 **웹 검색**등
   - 방대한 데이터 검색에서 **적절한 검색 결과**를 빠르게 찾고 싶은 경우에 중요한 지표
+  
+
+## 8. 검색 결과 순위와 관련된 지표 계산하기
+- 개념
+  - SQL : `AVG` 함수
+  - 분석 : `MAP`(Mean Average Precision)
+- **재현율**과 **정확률**으로 실제 검색 엔진 검토시, 복잡한 조건 검토하게 되면 부족한 점 존재
+  - 검색 결과의 순위는 고려하지 않음
+  - 정답과 정답이 아닌 아이템을 `0`과 `1`이라는 두가지 값으로밖에 표현할 수 없음
+  - 모든 아이템에 대한 정답을 미리 준비하는 것은 사실 **불가능**에 가까움
+- 검색 결과의 순위는 고려하지 않음 예시
+  - 검색 상위 10개의 **적합률**이 `40%`인 검색엔진 A, B가 존재할 때,
+  - A는 `1, 4`번째에 정답 아이템 존재, 검색엔진 B는 `7, 10`번째 정답 아이템 존재
+  - 당연히 `1`이 더 좋은 검색 엔진이라 할 수 있으나, `P@10`을 구하면, 두 검색엔진은 **같은 성능**으로 판단
+  - 검색 엔진을 고려한 지표
+    - MAP(Mean Average Precision)
+    - MRR(Mean Reciprocal Rank)
+- 정답과 정답이 아닌 아이템이라는 두가지로 밖에 표현하지 못함
+  - 이전 절까지 다룬 정답 아이템의 경우, 어떤 아이템이 **검색에 히트**되어도 **같은 것으로 취급**
+  - 경우에 따라 **굉장히 관련 있는 아이템**, **조금 관련있는 아이템**처럼, 단계쩍인 점수를 사용해 정답 아이템을 다루고 싶은 경우 존재
+  - 예시
+    - 사용자의 별점(5단계) 리뷰 데이터가 존재할 때,
+    - 해당 점수를 정답 데이터를 사용하여 **적합률**과 **재현률**을 구할 경우
+      - 사용자로부터 입력받은 **별점**을 활용할 수 없음
+  - 단계적인 점수를 고려하여 정답 아이템을 다루는 지표
+    - DCG(Discounted Cumulated Gain)
+    - NDCG(Normalized DCG)
+- 모든 아이템에 대해 정답 아이템을 준비할 수 없음
+  - 검색 엔진이 필요한 서비스의 경우, 검색 대상 아이템이 많을 수 있음
+  - 사용자 **행동 로그**등에서, 기계적으로 정답 아이템을 만들 수 있겠으나,
+    - 사용자가 각각 확인할 수 있는 아이템의 수는 많지 않음
+  - **재현율**과 **적합률**을 적용하더라도, 극단적으로 낮은 값이기 때문에 사용하기 어려움
+  - 검색 대상 아이템 수에서, 정답 아이템 수가 한정된 경우에는 **BPREF**(Binary Preference)를 활용
+  
+  ### MAP으로 검색 결과의 순위를 고려해 평가하기
+  - 검색 결과의 순위를 고려한 평가
+  - 검색 결과 상위 `n`개의 **적합률** 평균
+  - 정답 아이템이 순위에 아예 없는경우, 편의상 적합률을 `0`으로 정의
+  - 예시
+    - 정답 아이템 수가 `4`개라고 할때, `P@10 = 40%`
+    - 상위 `1~4번째`가 모두 정답 아이템
+      - MAP 값은 `100 * ((1/1) + (2/2) + (3/3) + (4/4))/4 = 100`으로 계산
+      - 상위 `7~10`번째가 정답 아이템이라면, `P@10 = 40%`
+        - `MAP = 100 * ((1/7) + (2/8) + (3/9) + (4/10))/4 = 28.15`
+          - 이전보다 낮게 평가함
+          - MAP을 계산하려면, **정답 아이템**별로 **정확률** 추출 필요
+            - 이전 절의 쿼리를 활용하여 `connect`컬럼의 플래그가 `1`인 레코드를 추출하면 됨
+            
+#### CODE.21.20. 정답 아이템별로 적합률을 추출하는 쿼리
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  search_result_with_correct_items AS (
+  -- CODE.21.13.
+  )
+  , search_result_with_precision AS (
+  -- CODE.21.17
+  )
+  SELECT
+    keyword
+    , rank
+    , precision
+  FROM
+    search_result_with_precision
+  WHERE
+    correct = 1
+  ;
+  ```
+
+#### CODE.21.21. 검색 키워드별로 정확률의 평균을 계산하는 쿼리
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  search_result_with_correct_items AS (
+  -- CODE.21.13
+  )
+  , search_result_with_precision AS (
+  -- CODE.21.17
+  )
+  , average_precision_for_keywords AS (
+  SELECT
+    keyword
+    , AVG(precision) AS average_precision
+  FROM
+    search_result_with_precision
+  WHERE
+    correct = 1
+  GROUP BY
+    keyword
+  )
+  SELECT *
+  FROM
+    average_precision_for_keywords
+  ;
+  ```
+  
+#### CODE.21.22. 검색 엔진의 MAP을 계산하는 쿼리
+- 검색 키워드별로 정확률의 평균을 추출한 이후, 검색 엔진 자체의 MAP을 계산
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  search_result_with_correct_itmes AS (
+  -- CODE.21.13
+  )
+  , search_result_with_precision AS (
+  -- CODE.21.17
+  )
+  , average_precision_for_keywords AS (
+  -- CODE.21.21
+  )
+  SELECT
+    AVG(average_precision) AS mean_average_precision
+  FROM
+    average_precision_for_keywords
+  ;
+  ```
+
+### 검색 평가와 관련한 다른 지표들
+#### 정확률(Precision)
+- 검색 결과 순위 중에서, 얼마나 많은 비율의 아이템이 제대로 출력되는가
+- 웹 검색에서 처럼, 방대한 **중복**을 포함한 정보에서
+  - 관련 정보를 재빠르게 추출해야할 때 사용
+
+#### 재현율(Recall)
+- 사용자가 원할 것으로 보이는 아이템 중에서
+  - 얼마나 많은 비율의 아이템이 제대로 출력되는가
+- `법률계` 또는 `의학계`를 대상으로 하는 검색 처럼
+  - 결과에 **누수**가 있으면 안되는 경우에 중요
+
+#### P@n
+- 순위 상위 `n`개를 기반으로 측정한 Precision
+
+#### MAP(Mean Average Precision)
+- 각각의 쿼리에 대한 Average Precision의 평균값
+
+#### MRR(Mean Reciprocal Rank)
+- 순위 중에서 **처음부터 정답 아이템이 나오는 순위**의 **역수**를 취한 뒤 평균을 구한 값
+- 평균역순위
+
+#### E-Measure
+- `Precision`과 `Recall`을 합쳐 만든 단일 지표
+- `Precision`과 `Recall`을 1:1로 합치면 `F-Measure`가 됨
+
+#### F-Measure
+- `Precision`과 `Recall`의 조회 평균
+
+#### NDCG(Normalized Discounted Cumulated Gain)
+- 아이템의 평가를 **여러 레벨**로 설정하고,
+  - 순위 내부에서 **순위를 추가**한 지표
+- 정답 데이터를 만들기 어렵지만, **신뢰도가 매우 높음**
+
+#### BPREF(Binary Preferences)
+- 아이템 사이의 **상대적인 관심도**를 기준으로 하는 지표
+- 아이템 공간이 굉장히 거대해서
+  - 평가 데이터를 만들기 힘든 경우에 사용
+  
+### 정리
+- 검색 엔진을 **정량적**으로 평가하기 위한 지표는
+  - 위 정리 내용 외에 많은 것이 존재
+- NDCG와 BPREF와 같은 다른 지표에 대해서도
+  - 정의와 적용 범위를 확인 이후
+  - 어떻게 쿼리를 작성하면 구할수 있을지 고민할 것
