@@ -132,3 +132,202 @@
 - 추천 시스템에는 다양한 목적, 효과 모듈이 존재
 - 추천 시스템의 정의를 확실하게 하고
   - 어떤 효과를 기대하는지 등을 구체화 한 뒤, 시스템을 구축하는 것을 추천
+
+## 2. 특정 아이템에 흥미가 있는 사람이 함께 찾아보는 아이템 검색
+- 개념
+  - SQL : `SUM(CASE~)`, `ROW_NUMBER` 함수
+  - 분석 : 백터 내적, L2 정규화(Norm Nomalize), 코사인 유사도
+- 사용자의 **접근 로그**를 사용해서 만들 수 있는 추천 시스템 중에서도,
+  - 간단하고, 효과가 높은 추천시스템
+  - `특정 아이템에 흥미가 있는 사람이 함께 찾아보는 아이템` -> **Item to Item 추천**
+- Item to Item 추천
+  - `User to Item` 추천과 비교하여, 구현이 쉽고 효과적인 이유는
+  - 일반적인 시스템은 **사용자 유동성 > 아이템 유동성**으로, 데이터를 축적하기 더 쉽기 때문
+  - 사용자보다 아이템은 지속해서 사이트에 공개 되는등, 접근 로그가 꾸준히 유지됨
+- 사용자의 흥미/관심은 꾸준히 변화하나,
+  - 아이템의 연관성은 시간이 지나도 **크게 변하지 않음**
+- 오래된 로그를 활용해도, 큰 문제가 되지 않음
+- 다만, 뉴스 기사 처럼 아이템 자체가 유동적인 경우에는
+  - 이러한 장점을 누릴 수 없으므로 유의
+
+### 접근 로그를 사용해 아이템의 상관도 계산하기
+- **접근 로그**에는
+  - **사용자별 아이템 열람**과 **구매 액션**이 저장되어 있음
+  - **23.1**에서도 설명했듯이, **열람 로그**와 **구매 로그**의 특징을 잘 활용하면, 더 효과적으로 추천 가능
+- **접근 로그**와 **구매 로그**를 동시에 다루는 **범용 쿼리**
+  - 두 가지의 **가중치**를 변경해서 **열람 기반 추천**과 **구매 기반 추천**에 활용할 수 있는 코드 확인
+- 다음 코드는 **로그를 기반으로** 사용자와 아이템 **조합**을 구하고 점수를 계산하는 쿼리
+  - 사용자 단위의 `아이템 열람 수 : 구매 수 = 3:7` 비율로 가중치를 두어, 평균을 구하고
+    - 이를 사용자의 아이템에 대한 관심도 점수로 사용
+
+#### CODE.23.1. 열람 수와 구매 수를 조합한 점수를 계산하는 쿼리
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  ratings AS (
+    SELECT
+      user_id
+      , product
+      -- 상품 열람 수
+      , SUM(CASE WHEN action = 'view' THEN 1 ELSE 0 END) AS view_count
+      -- 상품 구매 수
+      , SUM(CASE WHEN action = 'purchase' THEN 1 ELSE 0 END) AS purchase_count
+      -- 열람 수 : 구매 수 = 3:7 비율의 가중치 주어 평균 계산
+      , 0.3 * SUM(CASE WHEN action='view' THEN 1 ELSE 0 END)
+        + 0.7 * SUM(CASE WHEN action='purchase' THEN 1 ELSE 0 END)
+        AS score
+    FROM
+      action_log
+    GROUP BY
+      user_id, product
+  )
+  SELECT *
+  FROM
+    ratings
+  ORDER BY
+    user_id, score DESC
+  ;
+  ```
+- 사용자의 아이템에 관한 흥미를 **수치화*** 했을 경우,
+  - 그 점수를 조합하여, 아이템 사이의 **유사도**를 계산
+- 다음 코드는 **아이템 사이의 유사도**를 계산하고, 순위에 따라 출력하는 쿼리
+
+#### CODE.23.2. 아이템 사이의 유사도를 계산하고 순위를 생성하는 쿼리
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  ratings AS (
+    -- CODE.23.1.
+  )
+  SELECT
+    r1.product AS target
+    , r2.product AS related
+    -- 모든 아이템을 열람/구매한 사용자 수
+    , COUNT(r1.user_id) AS users
+    -- 스코어들을 곱하고 합계를 구해 유사도 계산
+    , SUM(r1.socre * r2.score) AS score
+    -- 상품의 유사도 순위 계산
+    , ROW_NUMBER()
+        OVER(PARTITION BY r1.product ORDER BY SUM(r1.score * r2.score) DESC)
+      AS rank
+  FROM
+    ratings AS r1
+    JOIN
+      ratings AS r2
+      -- 공통 사용자가 존재하는 상품의 페어 만들기
+      ON r1.user_id = r2.user_id
+  WHERE
+    -- 같은 아이템의 경우에는 페어 제외하기
+    r1.product <> r2.product
+  GROUP BY
+    r1.product, r2.product
+  ORDER BY
+    target, rank
+  ;
+  ```
+- 아이템들의 유사도를 계산하려면
+  - 양쪽 아이템을 **모두 열람**하거나 **구매한 사용자**가 필요
+- 따라서 `ratings` 테이블을 **사용자 ID**로 자기 결합하고
+  - 공통 사용자가 존재하는 **아이템 페어**를 생성
+- 이후, 같은 아이템으로 만들어지는 페어는 **제외**하고,
+  - 아이템 페어를 집약한 뒤, **유사도**를 계산
+- 2개의 아이템에 대한 **사용자의 점수**를 곱하여 **유사도**를 집계
+  - **벡터의 내적**
+  - 벡터 : 어떤 아이템에 대해 부여된 사용자의 점수를 나열한 **숫자의 집합**
+  - 곱한 점수가 높을수록 **유사도**가 높음
+
+### 점수 정규화 하기
+- 단순히 **백터 내적**을 사용한 유사도는, 실적용시 **정밀도 문제**가 발생
+  - 접근수가 많은 아이템의 유사도가 **상대적으로 높게 평가**
+  - 점수의 값이 **어느정도의 유사도**를 나타내는지 점수만으로 확인이 어려움
+    - 해당 점수가 높은 것인지, 낮은 것인지 판단이 어려움
+    - 다른 아이템과 비교해서 상대적인 점수의 위치를 확인해야 함
+- 이에 해결책은 **벡터 정규화**
+- 벡터 정규화
+  - 벡터를 모두 **같은 길이**로 만든다는 의미
+  - 벡터의 각 수치를 **제곱** 후 더한 뒤, 제곱근을 취한 것 -> **벡터의 길이**
+- 두 점간의 거리를 계산할 때 사용하는 `Euclidean distance`(유클리드 거리) 정의와 동일
+- norm : 벡터의 크기
+  - 벡터의 각 수치를 나누면, 벡터의 `norm = 1`
+  - 이렇게 정규화 하는 방식을 `L2 정규화` 또는 `2 norm 정규화`라고 부름
+- 다음 코드는
+  - 사용자의 아이템에 대한 점수 집합을 **아이템 벡터**로 만든 이후, **L2 정규화**하는 쿼리
+  - 벡터 norm의 계산에는 `SUM()`, `OVER()`함수와 `SORT()`함수를 사용
+  - 이렇게 구한 `norm`으로 각각의 점수를 나누어 `norm_score`를 계산
+
+#### CODE.23.3. 아이템 벡터를 L2 정규화하는 쿼리
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  ratings AS (
+    -- CODE.23.1.
+  )
+  , product_base_normalized_ratings AS (
+    -- 아이템 벡터 정규화하기
+    SELECT
+      user_id
+      , product
+      , score
+      , SQRT(SUM(score * score) OVER(PARTITION BY product)) AS norm
+      , score / SQRT(SUM(score * score) OVER(PARTITION BY product)) AS norm_score
+    FROM
+      ratings
+  )
+  SELECT *
+  FROM
+    prodduct_base_normalized_ratings
+  ;
+  ```
+- 정규화 시에 무조건 벡터의 크기는 **1**
+- 이어, 정규화된 점수를 사용하여 **아이템의 유사도**를 계싼
+  - 코드 예에서는 **같은 아이템 페어**도 함께 유사도 계산
+
+#### CODE.23.4. 정규화된 점수로 아이템의 유사도를 계산하는 쿼리
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  ratings AS (
+    -- CODE.23.1.
+  )
+  , product_base_normalized_ratings AS (
+    -- CODE.23.3.
+  )
+  SELECT
+    r1.product AS target
+    , r2.product AS related
+    -- 모든 아이템을 열람/구매 한 사용자 수
+    , COUNT(r1.user_id) AS users
+    -- 스코어들을 곱하고 합계를 구해 유사도 계산하기
+    , SUM(r1.norm_score * r2.norm_score) As score
+    -- 상품의 유사도 순위 구하기
+    , ROW_NUMBER()
+      OVER(PARTITION BY r1.product ORDER BY SUM(r1.norm_score * r2.norm_score) DESC)
+      AS rank
+  FROM
+    product_base_normalized_ratings AS r1
+    JOIN
+      product_base_normalized_ratings AS r2
+      -- 공통 사용자가 존재하면 상품 페어 만들기
+      ON r1.user_id = r2.user_id
+  GROUP BY
+    r1.product, r2.product
+  ORDER BY
+    target, rank
+  ;
+  ```
+- 위 쿼리의 결과로
+  - 같은 아이템 페어의 유사도는 **반드시 1**
+  - 벡터를 정규화 하면, 자기 자신과의 내적값은 반드시 `1`이 되며, 내적의 최댓값 역시 `1`
+- 모든 벡터의 값이 **양수**라면,
+  - **내적의 최솟값은 0**
+- 값의 의미
+  - 내적의 값이 0; 유사성이 없는 아이템
+  - 내적의 값이 1; 완전히 일치하는 아이템
+- 벡터를 `L2 정규화`하여 내적한 값
+  - `2개의 벡터를` `n`차원에 매핑하였을 때, 이루는 각도에 `cos`값을 취한 값과 동일
+  - `코사인 유사도`라고 부름
+
+### 정리
+- 아이템 유사도를 계산하는 방법, **벡터의 내적**
+- 이때 벡터로 `아이템 조회 수`와 `구매 수`를 사용하였은데,
+  - 실제 서비스 추천시 사용하려면, **서비스 특성에 고려하여 벡터 구성**
