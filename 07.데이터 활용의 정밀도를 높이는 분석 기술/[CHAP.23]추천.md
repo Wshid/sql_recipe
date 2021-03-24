@@ -331,3 +331,167 @@
 - 아이템 유사도를 계산하는 방법, **벡터의 내적**
 - 이때 벡터로 `아이템 조회 수`와 `구매 수`를 사용하였은데,
   - 실제 서비스 추천시 사용하려면, **서비스 특성에 고려하여 벡터 구성**
+
+## 3. 당신을 위한 추천 상품
+- 개념
+  - SQL : `SUM(CASE ~)`, `ROW_NUMBER` 함수
+  - 분석 : 벡터 내적, L2 정규화, 코사인 유사도
+- 당신을 위한 추천 상품(User to Item)
+  - 사용자와 관련된 추천
+  - 웹사이트 최상위 페이지
+  - 사용자의 마이 페이지
+  - 검색 결과가 나오지 않았을 경우 출력하는 페이지는 물론이고,
+    - 메일 매거진, 푸시 통지 등의 다양한 상황에 활용할 수 있음
+- `Item to Item`은 아이템의 유사도만 계산하면 되지만
+  - `User to Item`은
+    - **사용자와 사용자의 유사도**를 계산하고,
+    - **유사 사용자가 흥미를 가진 아이템**을 구매해야 함
+- 다음 코드는 **사용자들의 유사도**를 계산하는 쿼리
+  - `L2 정규화`를 적용하기는 했으나,
+  - 사용자의 **백터 내적**을 계산할 수 있게, 사용자별로 **벡터 노름**을 계산
+
+### CODE.23.5. 사용자끼리의 유사도를 계산하는 쿼리
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  ratings AS (
+    -- CODE.23.1.
+  )
+  , user_base_normalized_ratings AS (
+    -- 사용자 벡터 정규화하기
+    SELECT
+      user_id
+      , product
+      , score
+      -- PARTITION BY user_id으로 사용자별 벡터 노름 계산하기
+      , SORT(SUM(score * score) OVER(PARTITION BY user_id)) AS more
+      , score / SORT(SUM(score * score) OVER(PARTITION BY user_id)) AS norm_score
+    FROM
+      ratings
+  )
+  , related_users AS (
+    -- 경향이 비슷한 사용자 찾기
+    SELECT
+      r1.user_id
+      , r2.user_id AS related_user
+      , COUNT(r1.product) AS products
+      , SUM(r1.norm_score * r2.norm_score) AS score
+      , ROW_NUMBER()
+          OVER(PARTITION BY r1.user_id ORDER BY SUM(r1.norm_score * r2.norm_score) DESC) AS rank
+    FROM
+      user_base_normalized_ratings AS r1
+      JOIN
+        user_base_normalized_ratings AS r2
+        ON r1.product = r2.product
+    WHERE
+      r1.user_id <> r2.user_id
+    GROUP BY
+      r1.user_id, r2.user_id
+  )
+  SELECT *
+  FROM
+    related_users
+  ORDER BY
+    user_id, rank
+  ;
+  ```
+- 유사 사용자 순위를 계산했다면,
+  - 유사 사용자가 흥미 있어 하는 아이템 목록을 추출하고 **아이템 순위**를 만듭니다.
+- 다음 코드는 **높은 순위**에 있는 유사 사용자를 기반으로 **추천 아이템**을 추천하는 쿼리
+- 유사 사용자 전체를 사용해 **아이템 목록**을 추출하면 계산량이 너무 많아짐
+- 낮은 순위의 **유사 사용자**는 큰 의미가 없는 데이터를 만들어낼 가능성이 있습니다.
+  - 유사도 상위 `n`명을 사용해 추천 상품을 계산하고 있습니다.
+- 추천 상품의 아이템에는 사용자가
+  - 기존에 구매한 상품이 포함될 수 있음
+- 이 코드에 구매한 상품을 제외하는 코드를 넣는다면 더욱 효율적으로 추천할 수 있음
+
+### CODE.23.6. 순위가 높은 유사 사용자를 기반으로 추천 아이템을 추출하는 쿼리
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  ratings AS (
+    -- CODE.23.1.
+  )
+  , user_base_normalized_ratings AS (
+    -- CODE.23.5.
+  )
+  , related_users AS (
+    -- CODE.23.5.
+  )
+  , related_user_base_products AS (
+    SELECT
+      u.user_id
+      , r.product
+      , SUM(u.score * r.score) * AS score
+      , ROW_NUMBER()
+          OVER(PARTITION BY u.user_id ORDER BY SUM(u.score * r.score) DESC)
+      AS rank
+    FROM
+      related_users AS u
+      JOIN
+        ratings AS r
+        ON u.related_user = r.user_id
+    WHERE
+      u.rank <= 1
+    GROUP BY
+      u.user_id, r.product
+  )
+  SELECT *
+  FROM
+    related_user_base_products
+  ORDER BY
+    user_id
+  ;
+  ```
+- 사용자의 **아이템 구매 수**를 활용해 이미 구매한 아이템을 필터링하는 쿼리는 다음과 같음
+- 구매하지 않은 상품만 결과로 출력할 것이므로
+  - `User to Item` 결과에 `LEFT JOIN`으로 구매 수를 결합하고, 
+    - 아이템의 구매가 `0`또는 `NULL`인 아이템을 압축한 뒤 순위를 생성합니다
+
+### CODE.23.7. 이미 구매한 아이템을 필터링하는 쿼리
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  ratings AS (
+    -- CODE.23.1.
+  )
+  , user_base_normalized_ratings AS (
+    -- CODE.23.5.
+  )
+  , related_suers AS (
+    -- CODE.23.5.
+  )
+  , related_user_base_products AS (
+    -- CODE.23.6.
+  )
+  SELECT
+    p.user_id
+    , p.product
+    , p.score
+    , ROW_NUMBER()
+        OVER(PARTITION BY p.user_id ORDER BY p.score DESC) AS rank
+  FROM
+    related_user_base_products AS p
+    LEFT JOIN
+      ratings AS r
+      ON p.user_id = r.user_id
+      AND p.product = r.product
+  WHERE
+    -- 대상 사용자가 구매하지 않은 상품만 추천하기
+    COALESCE(r.purchase_count, 0) = 0
+  ORDER BY
+    p.user_id
+  ;
+  ```
+- `User to Item`의 경우 등록한지 얼마 안 된
+  - 사용자와 게스트 사용자는, 데이터가 충분하지 않으므로, 제대로 예측하기가 어려움
+- 따라서 등록하지 얼마 안 되는 사용자는 `User to Item`이 아닌
+  - 다른 추천 로직(랭킹 또는 콘텐츠 기반)을 적용하는 것이 좋음
+- 그 밖에 게스트로 사용자 전체를 한 명으로 가정하고, `User to Item`을 만들어 대응하는 방법도 있음
+
+### 정리
+- 이번 절에서 소개한 **사용자 행동 로그**를 기반으로 **유사 아이템**을 찾고
+  - 추천하는 등의 기능은 **협업 필터링**이라고 부르는 개념의 한가지 구현 방법
+- **협업 필터링**에는
+  - 기계 학습을 통한 더 발전적인 방법도 많으므로,
+  - 다른 방법도 활용해서 다양한 추천에 도전해볼 것
