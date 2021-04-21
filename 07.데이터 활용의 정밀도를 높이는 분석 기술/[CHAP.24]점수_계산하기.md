@@ -183,3 +183,113 @@
 ### 정리
 - `3개 이상`의 값에 대해서도 같은 쿼리로 평균을 구할 수 있음
 - `3`개의 평균을 사용하면, 다양한 지표의 데이터 활용에 도움이 됨
+
+## 2. 값의 범위가 다른 지표를 정규화해서 비교 가능한 상태로 만들기
+- 개념
+  - SQL : `MIN` 윈도 함수, `MAX` 윈도 함수
+  - 분석 : `Min-Max` 정규화, 시그모이드 함수
+- 값의 범위(스케일)이 다른 지표를 결합할 때는
+  - 정규화라는 **전처리**를 해주어야 함
+- 샘플
+  - 상품 열람 수, 구매 수 데이터
+    - `user_id, product, view_count, purchase_count`
+  - 각각의 값을 정규화 해야함
+  - 상품 구매수는 `0 | 1`이지만, 열람 수는 `21, 49`와 같은 비교적 큰 수
+- `열람 수`와 `구매 수`를 모두 `0 ~ 1`의 실수로 변환해야 함
+
+### Min-Max 정규화
+- 서로 다른 값의 **폭**을 가지는 각 지표를 `0~1`의 스케일로 정규화 하는 방법
+- 각 지표의 `min`과 `max`를 구하고, 변환후의 최소 최대를 `0.0 ~ 1.0`이 되게 반영
+- 각각의 지표를 `min`으로 감산한 뒤,
+  - `max - min`을 나누는 방식
+- `열람 수`와 `구매 수`에 `Min-Max` 정규화를 적용하는 쿼리
+- 레코드 전체의 `min`, `max`를 구하기 위해 `min/max 윈도 함수 사용`
+
+#### CODE.24.5. 열람 수와 구매 수에 Min-Max 정규화를 적용하는 쿼리
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  SELECT
+    user_id
+    , product
+    , view_count AS v_count
+    , purchase_count AS p_count
+    , 1.0 * (view_count - MIN(view_count) OVER())
+      -- PostgreSQL, Redshift, BigQuery, SparkSQL의 경우 `NULLIF`로 0으로 나누는 것 피하기
+      / NULLIF((MAX(view_count) OVER() - MIN(view_count) OVER()), 0)
+      -- Hive의 경우 NULLIF 대신 CASE 사용
+      / (CASE
+          WHEN MAX(view_count) OVER() - MIN(view_count) OVER() = 0 THEN NULL
+          ELSE MAX(view_count) OVER() - MIN(view_count) OVER()
+          END
+        )
+      AS norm_view_count
+    , 1.0 * (purchase_count - MIN(purchase_count) OVER())
+      -- PostgreSQL, Redshift, BigQuery, SparkSQL의 경우 `NULLIF`로 0으로 나누는 것 피하기
+      / NULLIF((MAX(purchase_count) OVER() - MIN(purchase_count) OVER()), 0)
+      -- Hive의 경우 NULLIF 대신 CASE 사용
+      / (CASE
+          WHEN MAX(purchase_count) OVER() - MIN(purchase_count) OVER() = 0 THEN NULL
+          ELSE MAX(purchase_count) OVER() - MIN(purchase_count) OVER()
+          END
+        )
+      AS norm_p_count
+  FROM action_counts
+  ORDER BY user_id, product;
+  ```
+- `norm_v_count` : 정규화 후의 열람 수
+- `norm_p_count` : 정규화 후의 구매
+  - 구매 수의 경우, 최솟값과 최대값이 기존 `0, 1`이므로, 값이 변화되지 않음
+
+### 시그모이드 함수로 변환하기
+- `Min-Max 정규화`의 문제
+  - **모집단**의 변화에 따라, **정규화 후**의 값이 모두 변경 됨 
+    - 최댓값 또는 최소값이 변하는 경우
+  - 정규화 계산시, 데이터의 수에 따라 계산 비용이 의존적
+- 이 문제를 극복하기 위해 **결과값이 0~1**인 함수를 사용하여, 데이터를 변환하는 정규화 방법 사용
+- `0`이상의 값을 `0~1`의 범위로 변환해주는
+  - `S`자 곡선을 그리는 함수
+- 그 중에서도 `y=1/(1+e^(-ax))` 함수가 많이 사용됨
+  - 이 때, `a=1`인 함수를 **표준 시그모이드 함수**로 부름
+- 이러한 시그모이드 함수를 
+  - `x=0`일 때, `y=0`
+  - `x=unlimited`, `y=1`이 되도록 변경
+  - 매개변수 `a`(gain)에 적당한 값을 넣어 지표 조정
+- 시그모디으 함수를 사용해 변환하는 쿼리
+  - 열람수에는 적당하게 `gain 0, 1`
+  - 구매수에는 적당하게 `gain 10`을 적용
+- `gain`을 크게 적용할경우,
+  - **입력 값**이 조금 커지는 것만으로도, 변환후의 값이 `1`에 가까워짐
+
+#### CODE.24.6. 시그모이드 함수를 사용해 변환하는 쿼리
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  SELECT
+    user_id
+    , product
+    , view_count AS v_count
+    , purchase_count AS p_count
+    -- gain을 0.1로 사용한 sigmoid 함수
+    , 2.0 / (1 + exp(-0.1 * view_count)) - 1.0 AS sigm_v_count
+    -- gain을 10으로 사용한 sigmoid 함수
+    , 2.0 / (1 + exp(-10 * purchase_count)) - 1.0 AS sigm_p_count
+  FROM action_counts
+  ORDER BY user_id, product;
+  ```
+- `sigmoid`를 적용한
+  - **열람 수**
+    - `10 -> 0.4621`
+    - `49 -> 0.9852`
+  - **구매 수**
+    - gain이 `10`이므로, 기존 값(`0 ~ 1`)과 큰 차이가 없음
+- `Min-Max 정규화`와 다르게 값이 `2`배가 된다고, 변환된 값이 `2`배가 되는 것이 아님
+  - sigmoid 자체가 곡선이므로,
+  - `0`에 가까울 수록 **변환 후**의 값에 미치는 **영향이 큼**
+- 위 특징은 **열람 수**를 다룰 때 매우 좋음
+  - 열람 수가 `1`회인 상품과, `10`회인 상품은 **관심도**의 차이가 매우 크지만
+  - 열람 수가 `10001`회인 상품과, `1010`회인 상품은, 크게 관심도 차이가 나지 않음
+- 즉, **sigmoid** 함수를 사용해 **비선형 변환**을 하는 것이 더 직관적으로 이해할 수 있음
+
+### 정리
+- **값의 범위**(스케일)이 다른 지표를 다루는 여러가지 방법
+- 어떤 방법이 적합할지는 **데이터의 특성**에 따라 다름
+- 직접 사용해보면서, 어느쪽이 더 효율적일지 확인 필요
