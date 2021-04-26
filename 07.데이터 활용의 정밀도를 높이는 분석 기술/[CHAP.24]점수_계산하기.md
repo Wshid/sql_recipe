@@ -293,3 +293,109 @@
 - **값의 범위**(스케일)이 다른 지표를 다루는 여러가지 방법
 - 어떤 방법이 적합할지는 **데이터의 특성**에 따라 다름
 - 직접 사용해보면서, 어느쪽이 더 효율적일지 확인 필요
+
+## 3. 각 데이터의 편차값 계산하기
+- 개념
+  - SQL : `stddev_pop` 함수
+  - 분석 : 표준편차, 정규값, 편차값
+- 데이터의 **분포**가 **정규 분포**에 가깝다는게 어느정도 확실하다면,
+  - **정규값**과 **편차값**을 이용하는 경우가 많음
+- 일반적인 **편차값**의 정의와
+  - 이를 `SQL`로 구하는 방법
+
+### 표준편차, 정규값, 편차값
+#### 표준편차
+- 데이터의 **쏠림 상태**을 나타내는 값
+  ```bash
+  # 모집단의 표준편차를 구할 때
+  # SQL : stddev_pop
+  표준편차 = v((각 데이터 - 평균)^2을 모두 더한 것 / 데이터의 수)
+
+  # 모집단의 일부를 기반으로 표준편차를 구할 때
+  # SQL : sqddev
+  표준편차 = v((각 데이터 - 평균)^2를 모두 더한것 / 데이터의 개수 - 1)
+  ```
+- 표준편차의 `min = 0`
+- 표준편차가 커질수록 **데이터에 쏠림**이 존재
+
+#### 정규값
+- 평균으로부터 **얼마나 떨어져 있는지**
+- 데이터의 **쏠림 정도**를 기반으로 **점수의 가치**를 평가하기 쉽게
+  - 데이터를 변화하는 것 -> **정규화**
+- 정규화된 데이터를 **정규값**이라고 함
+  ```bash
+  정규값 = (각각의 데이터 - 평균) / 표준편차
+  ```
+- 정규값의 평균은 `0`, 표준 편차는 `1`
+- 이 특징을 활용하면
+  - 서로 다른 데이터, 단위가 다른 데이터(`e.g. CTR, CVR`)도 쉽게 비교 가능
+
+#### 편차값
+- **조건**이 다른 데이터를 쉽게 비교하고 싶을 때
+- **정규값**을 사용하여 계산
+  ```bash
+  편차값 = 각 정규화된 데이터 * 10 + 50
+  ```
+- 편차값의 평균은 `50`, 표준편차는 `10`
+
+#### 편차 계산하기
+- 편차값은 `10 * (각각의 값 - 평균 값 / 표준편차 + 50)`으로 계산 가능
+- **평균값**과 **표준편차**를 사용해 각 값을 계산하므로
+  - **윈도 함수**를 사용해 구해야 함
+- 윈도 함수를 사용하여 과목들의 **표준편차**, **기본값/편차값**을 계산하는 쿼리
+
+##### CODE.24.7. 표준편차, 기본값, 편차값을 계산하는 쿼리
+- `PostgreSQL`, `Hive`, `Redshift`, `SparkSQL`
+  ```sql
+  SELECT
+    subject
+    , name
+    , score
+    -- 과목별로 표준편차 구하기
+    , stddev_pop(score) OVER(PARTITION BY subject) AS stddev_pop
+    -- 과목별 평균 점수 구하기
+    , AVG(score) OVER(PARTITION BY subject) AS avg_score
+    -- 점수별로 기준 점수 구하기
+    , (score - AVG(score) OVER(PARTITION BY subject))
+      / stddev_pop(score) OVER(PARTITION BY subject) AS std_value
+    -- 점수별로 편차값 구하기
+    , 10.0 * (score - AVG(score) OVER(PARTITION BY subject))
+      / stddev_pop(score) OVER(PARTITION BY subject) + 50 AS deviation
+  FROM exam_scores
+  ORDER BY subject, name;
+  ```
+- **BigQuery**의 경우 `stddev_pop`함수를 **윈도 함수**로 사용할 수 없으므로,
+  - 다른 테이블에 **표준편차**를 계산해두고, **각 레코드와 결합**
+
+##### CODE.24.8. 표쥰편차를 따로 계산하고, 편차값을 계산하는 쿼리
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  exam_stddev_pop AS (
+    -- 다른 테이블에서 과목별로 표준편차 구해두기
+    SELECT
+      subject
+      , stddev_pop(score) AS stddev_pop
+    FROM exam_scores
+    GROUP BY subject
+  )
+  SELECT
+    s.subject
+    , s.name
+    , s.score
+    , d.stddev_pop
+    , AVG(s.score) OVER(PARTITION BY s.subject) AS avg_score
+    , (s.score - AVG(s.score) OVER(PARTITION BY s.subject)) / d.stddev_pop AS std_value
+    , 10.0 * (s.score - AVG(s.score) OVER(PARTITION BY s.subject)) / d.stddev_pop + 50 AS deviation
+  FROM
+    exam_scores AS s
+    JOIN
+      exam_stddev_pop AS d
+      ON s.subject = d.subject
+  ORDER BY s.subject, s.name;
+  ```
+
+### 정리
+- **기본값**과 **편차값** 등의 지표를 `SQL`로 계산하는 방법은
+  - **윈도 함수**의 등장 덕분에, 매우 쉬워짐
+- **지표 정의**와 **의미**를 확실하게 확인하여, **의미 있는 데이터 분석**을 할 것
