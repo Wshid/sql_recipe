@@ -399,3 +399,129 @@
 - **기본값**과 **편차값** 등의 지표를 `SQL`로 계산하는 방법은
   - **윈도 함수**의 등장 덕분에, 매우 쉬워짐
 - **지표 정의**와 **의미**를 확실하게 확인하여, **의미 있는 데이터 분석**을 할 것
+
+## 4. 거대한 숫자 지표를 직감적으로 이해하기 쉽게 가공하기
+- 개념
+  - SQL : `log` 함수
+  - 분석 : 록 
+- 사람이 직감적으로 이해하기 쉬운 값으로 변형하는
+  - **비선형적인 함수**로 **로그**를 사용하는 방법
+- `사용자 액션 수`, `경과일 수`처럼
+  - 값이 크면 클수록 **값 차이**가 큰 영향을 주지 않는경우,
+  - **로그**를 사용해 데이터를 변환하면, 이해하기 쉽게 가공 가능
+- 샘플
+  - `dt`, `user_id`, `product`, `v_count`, `p_count`
+    - 사용자별 상품 열람 수(`v_count`)
+    - 구매 수(`p_count`)
+- **23.2**에서는
+  - 모든 기간의 `열람 수 + 구매 수`를 하여, **상품 점수**를 계산
+  - 이번절에서는
+    - **오래된** 날짜의 액션일수록, **가중치를 적게** 주는 방법 사용
+- 사용자별로 **최종 액션일**, **각각의 레코드와 최종 액션일과의 날짜 차이** 계산
+
+### CODE.24.9. 사용자들의 최종 접근일과 각 레코드와의 날짜 차이를 계산하는 쿼리
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  action_counts_with_diff_date AS (
+    SELECT *
+      -- 사용자별로 최종 접근일과 각 레코드의 날짜 차이 계산
+      -- PostfreSQL, Redshift의 경우 날짜끼리 빼기 연산 가능
+      , MAX(dt::date) OVER(PARTITION BY user_id) AS last_access
+      , MAX(dt::date) OVER(PARTITION BY user_id) - dt::date AS diff_date
+      -- BigQuery의 경우 date_diff 함수 사용하기
+      , MAX(date(timestamp(dt))) OVER(PARTITION BY user_id) AS last_access
+      , date_diff(MAX(date(timestamp(dt))) OVER(PARTITION BY user_id), date(timestamp(dt)), date) AS diff_date
+      -- Hive, SparkSQL의 경우 datediff 함수 사용
+      , MAX(to_date(dt)) OVER(PARTITION BY user_id) AS last_access
+      , datediff(MAX(to_date(dt)) OVER(PARTITION BY user_id), to_date(dt)) AS diff_date
+    FROM
+      action_counts_with_date
+  )
+  SELECT *
+  FROM action_counts_with_diff_date;
+  ```
+- `최종 액션일`과의 차이가 크면 클수록, 가중치를 낮게 하는 방법
+  - 날짜 차이에 **역수** 취하기?
+    - 단순하게 역수를 취하게 되면 `2일 전, 1/2`, `30일 전, 1/30`이 되기 때문에, 극단적으로 작아짐
+    - 따라서 **날짜 차이**에 **로그**를 취해
+      - 날짜가 증가하도록 가중치가 **완만하게 감소**하게 변경
+  - 추가로, 날짜 차이가 `0`일 때, 가중치의 최댓값이 `1`이 될 수 있게 하고
+  - 추가적인 **매개 변수**를 사용해, **가중치의 변화율**을 조정할 수 있도록 매개변수 a를 둔다
+- 수식
+  ```
+  y = 1/(log2(ax+2)) {0 <= x}
+  ```
+- 매개변수가 `0`에 가까워질수록, 그래프가 **완만**해지며
+- `a=0`이 되어버리면, 가중치가 항상 `1`이 된다
+- 매개 변수를 크게 할수록 **가중치의 감소가 눈에 띄게 변화**
+
+### CODE.24.10. 날짜 차이에 따른 가중치를 계산하는 쿼리
+```sql
+WITH
+action_counts_with_diff_date AS (
+  -- CODE.24.9.
+), action_counts_with_weight AS (
+  SELECT *
+    -- 날짜 차이에 따른 가중치 계산하기(a = 0.1)
+    -- PostgreSQL, Hive, SparkSQL, log(<밑수>, <진수>) 함수 사용
+    , 1.0 / log(2, 0.1 * diff_date + 2) AS weight
+    -- Redshift의 경우 log는 상용 로그만 존재, `log2`로 나눠주기
+    , 1.0 / ( log(CAST(0.1 * diff_date + 2 AS double precision)) / log(2) ) AS weight
+    -- BigQuery의 경우, log(<진수>, <밑수>) 함수 사용
+    , 1.0 / log(0.1 * diff_date + 2, 2) AS weight
+  FROM action_counts_with_diff_date
+)
+SELECT
+  user_id
+  , product
+  , v_count
+  , p_count
+  , diff_date
+  , weight
+FROM action_counts_with_weight
+ORDER BY
+  user_id, product, diff_date DESC
+;
+```
+- 최종 접근일과의 날짜 차이가 `0`일때, 가중치가 `1.0`으로 가장 크고,
+  - 최종 접근일과의 날짜 차이가 커질수록, 가중치가 완만하게 줄어듦
+- 지금까지 구한 과정으로 구한 **가중치**를
+  - **열람 수**와 **구매 수**에 곱해 점수를 계산
+- 날짜별로 **열람 수**와 **구매 수**에 해당 날짜의 **가중치**를 곱한 뒤 더해 점수 계산
+
+### CODE.24.11. 일수차에 따른 중첩을 사용해 열람 수와 구매 수 점수를 계산하는 쿼리
+```sql
+WITH
+action_counts_with_date AS (
+  -- CODE.24.9.
+)
+, action_counts_with_weight AS (
+  -- CODE.24.10.
+)
+, action_scores AS (
+  SELECT
+    user_id
+    , product
+    , SUM(v_count) AS v_count
+    , SUM(v_count * weight) AS v_score
+    , SUM(p_count) AS p_count
+    , SUM(p_count * weight) AS p_score
+  FROM action_counts_with_weight
+  GROUP BY
+    user_id, product
+)
+SELECT *
+FROM action_scores
+ORDER BY
+  user_id, product;
+```
+- 날짜에 따라 가중치가 적용된 점수 산출 가능
+- 같은 구매 수의 상품이더라도, 날짜가 오래되었다면
+  - 점수가 낮게 측정
+
+### 정리
+- `열람 수`와 `구매 수`처럼 **어떤 것을 세어 집계한 숫자**는
+  - 점수르 계산할 때, **로그**를 취해서 값의 변화를 **완만하게** 표현 가능
+- 이를 활용하면 사람이 더 **직감적으로** 쉽게 값 변화 인지 가능
+- 로그는 수학적 요소지만, **그 활용범위가 넓음**
