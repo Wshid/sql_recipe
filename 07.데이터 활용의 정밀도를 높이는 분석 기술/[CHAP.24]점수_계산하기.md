@@ -525,3 +525,118 @@ ORDER BY
   - 점수르 계산할 때, **로그**를 취해서 값의 변화를 **완만하게** 표현 가능
 - 이를 활용하면 사람이 더 **직감적으로** 쉽게 값 변화 인지 가능
 - 로그는 수학적 요소지만, **그 활용범위가 넓음**
+
+## 5. 독자적인 점수 계산 방법을 정의해서 순위 작성하기
+- 분석 : 가중 평균
+- 예시 데이터
+  - 월별 상품 매출 수(`monthly_sales`)
+  - `year_month, item, amount`
+- **순서 생성** 방침은
+  - 1년 동안의 계절마다 **주기적으로 팔리는 상품**과
+  - **최근 트랜드 상품**이 상위에 오도록 순위를 구성
+- 따라서 `1년 전의 매출과`, `최근 1개월`의 매출 값으로 **가중 평균**을 내서 점수를 사용
+- `4분기별 상품 매출액과 합계`를 구하는 쿼리
+  - 상품별 `2016 1q`, `4q`의 매출액을 사용하여 순위를 구함
+
+### CODE.24.12. 분기별 상품 매출액과 매출 합계를 집계하는 쿼리
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  item_sales_per_quarters AS (
+    SELECT item
+      -- 2016.1q의 상품 매출 모두 더하기
+      , SUM(
+        CASE WHEN year_month IN ('2016-01', '2016-02', '2016-03') THEN amount ELSE 0 END
+      ) AS sales_2016_q1
+      -- 2016.4q의 상품 매출 모두 더하기
+      , SUM(
+        CASE WHEN year_month IN ('2016-10', '2016-11', '2016-12') THEN amount ELSE 0 END
+      ) AS sales_2016_q4
+    FROM monthly_sales
+    GROUP BY item
+  )
+  SELECT
+    item
+    -- 2016.1q의 상품 매출
+    , sales_2016_q1
+    -- 2016.1q의 상품 매출 합계
+    , SUM(sales_2016_q1) OVER() AS sum_sales_2016_q1
+    -- 2016.4q의 상품 매출
+    , sales_2016_q4
+    -- 2016.4q의 상품 매출 합계
+    , SUM(sales_2016_q4) OVER() AS sum_sales_2016_q4
+  FROM item_sales_per_quaters
+  ;
+  ```
+- 위 출력 결과에서 `2016.1q`와 `4q`의 합계 매출액을 확인하면,
+  - 서비스 전체의 매출이 상승 경향이 있는 것을 알 수 있음(각각 `254,000`, `550,000`)
+- 따라서 1분기 매출액과 4분기 매출액이 같다고 해도, **의미가 다름**
+- 다음 코드는 `1q`와 `4q`의 매출액을 정규화하여 점수를 계산하는 쿼리
+  - 분모가 다른 2개의 지표를 비교할 수 있도록 `Mix-Max 정규화` 사용
+
+### CODE.24.13. 분기별 상품 매출액을 기반으로 점수를 계산하는 쿼리
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  item_sales_per_quarters AS (
+    -- CODE.24.12
+  )
+  , item_scores_per_quarters AS (
+    SELECT
+      item
+      , sales_2016_q1
+      , 1.0
+        * (sales_2016_q1 - MIN(sales_2016_q1) OVER())
+        -- PostgreSQL, Redshift, BigQuery, SparkSQL, NULLIF로 divide 0 회피
+        / NULLIF(MAX(sales_2016_q1) OVER() - MIN(sale_2016_q1) OVER(), 0)
+        -- Hive, CASE 식 사용
+        / (CASE
+            WHEN MAX(sales_2016_q1) OVER() - MIN(sales_2016_q1) OVER() = 0 THEN NULL
+            ELSE MAX(sales_2016_q1) OVER() - MIN(sales_2016_q1) OVER() 
+          END)
+        AS score_2016_q1
+      , sales_2016_q4
+      , 1.0
+        * (sales_2016_q4 - MIN(sales_2016_q4) OVER())
+        -- PostgreSQL, Redshift, BigQuery, SparkSQL, NULLIF로 divide 0 회피
+        / NULLIF(MAX(sales_2016_q4) OVER() - MIN(sales_2016_q4) OVER(), 0)
+        -- Hive, CASE 식 사용
+        / (CASE
+            WHEN MAX(sales_2016_q4) OVER() - MIN(sales_2016_q4) OVER() = THEN NULL
+            ELSE MAX(sales_2016_q4) OVER() - MIN(sales_2016_q4) OVER()
+          END)
+        AS score_2016_q4
+    FROM item_sales_per_quarters
+  )
+  SELECT *
+  FROM item_scores_per_quarters
+  ;
+  ```
+- 다음으로, `1q`와 `4q`의 매출을 기반으로 **정규화된 점수**를 계산했다면,
+  - `1q`와 `4q`의 **가중 평균**을 구하고, 하나의 점수로 집약하기
+- `1q : 4q = 7 : 3`으로 지정하고 가중 평균을 계산할때 다음과 같이 순위 생성
+
+### CODE.24.14. 분기별 상품 점수 가중 평균으로 순위를 생성하는 쿼리
+- `PostgreSQL`, `Hive`, `Redshift`, `BigQuery`, `SparkSQL`
+  ```sql
+  WITH
+  item_sales_per_quarters AS (
+    -- CODE.24.12
+  ),
+  item_scores_per_quarters AS (
+    -- CODE.24.13
+  )
+  SELECT
+    item
+    , 0.7 * score_2016_q1 + 0.3 * score_2016_q4 AS score
+    , ROW_NUMBER()
+        OVER(ORDER BY 0.7 * score_2016_q1 + 0.3 * score_2016_q4 DESC)
+      AS rank
+  FROM item_scores_per_quarters
+  ORDER BY rank
+  ;
+  ```
+
+### 정리
+- **주기 요소가 있는 상품**과 **트렌드 상품**을 균형 있게 조합한 **순위**를 생성할 수 있음
+- 추가로 **여러 가지 점수 계산 방식**을 조합하면 다양한 분야에 활용할 수 있음
